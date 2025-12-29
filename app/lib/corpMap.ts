@@ -1,114 +1,114 @@
-// app/lib/corpMap.ts
-import AdmZip from "adm-zip";
-import { XMLParser } from "fast-xml-parser";
+// app/api/fundamentals/route.ts
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-let _cache: Map<string, string> | null = null;
-let _cacheAt = 0;
+import { NextResponse } from "next/server";
+import { getCorpCodeByTicker } from "@/app/lib/corpMap";
 
-// 서버리스 환경에서 너무 자주 받지 않게 24시간 캐시 (인스턴스 기준)
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+function jsonError(status: number, message: string, extra?: Record<string, unknown>) {
+  return NextResponse.json(
+    { status: "error", message, ...(extra ?? {}) },
+    { status, headers: { "Cache-Control": "no-store" } }
+  );
+}
 
-function asText(v: any): string {
-  if (v === null || v === undefined) return "";
-  if (typeof v === "string") return v;
-  if (typeof v === "number" || typeof v === "boolean") return String(v);
+function pick(q: URLSearchParams, key: string, fallback?: string) {
+  const v = q.get(key);
+  return (v ?? fallback ?? "").trim();
+}
 
-  // fast-xml-parser 설정/버전에 따라 object 형태로 올 수도 있어서 방어
-  if (typeof v === "object") {
-    if (typeof v["#text"] === "string") return v["#text"];
-    if (typeof v["text"] === "string") return v["text"];
-    if (typeof v["value"] === "string") return v["value"];
-    // 마지막 방어
-    try {
-      return String(v);
-    } catch {
-      return "";
+export async function GET(req: Request) {
+  const url = new URL(req.url);
+  const q = url.searchParams;
+
+  const ticker = pick(q, "ticker");
+  if (!ticker) return jsonError(400, "ticker is required", { ticker });
+
+  const bsns_year = pick(q, "bsns_year", String(new Date().getFullYear() - 1));
+  const reprt_code = pick(q, "reprt_code", "11011");
+  const fs_div = pick(q, "fs_div", "CFS");
+
+  const dartKey = process.env.DART_API_KEY;
+  if (!dartKey) return jsonError(500, "DART_API_KEY is missing on server", { ticker });
+
+  // 1) corp_code 조회 (여기가 크래시 나도 500 대신 JSON으로 방어)
+  let corp_code: string | null = null;
+  try {
+    corp_code = await getCorpCodeByTicker(ticker);
+  } catch (e: any) {
+    return jsonError(500, "corp_code resolver crashed (corpMap.ts)", {
+      ticker,
+      detail: e?.message ?? String(e),
+    });
+  }
+
+  if (!corp_code) {
+    return jsonError(404, "corp_code not found for ticker", {
+      ticker,
+      hint: "DART corpCode.xml에서 해당 종목코드가 stock_code로 매칭되는지 확인",
+    });
+  }
+
+  // 2) DART 재무 호출
+  const endpoint = "https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json";
+  const dartUrl = new URL(endpoint);
+  dartUrl.searchParams.set("crtfc_key", dartKey);
+  dartUrl.searchParams.set("corp_code", corp_code);
+  dartUrl.searchParams.set("bsns_year", bsns_year);
+  dartUrl.searchParams.set("reprt_code", reprt_code);
+  dartUrl.searchParams.set("fs_div", fs_div);
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
+
+    const res = await fetch(dartUrl.toString(), {
+      signal: controller.signal,
+      cache: "no-store",
+    }).finally(() => clearTimeout(timer));
+
+    if (!res.ok) {
+      return jsonError(502, "DART upstream HTTP error", {
+        ticker,
+        corp_code,
+        http_status: res.status,
+        http_status_text: res.statusText,
+      });
     }
-  }
-  return "";
-}
 
-function normalizeStockCode(code: string): string {
-  const s = (code ?? "").trim();
-  if (!s) return "";
-  // DART의 stock_code는 보통 6자리지만 혹시 모자라면 0 패딩
-  return s.padStart(6, "0");
-}
+    const data = await res.json();
 
-function normalizeCorpCode(code: string): string {
-  const s = (code ?? "").trim();
-  if (!s) return "";
-  // corp_code는 8자리
-  return s.padStart(8, "0");
-}
-
-async function loadCorpMap(): Promise<Map<string, string>> {
-  const now = Date.now();
-  if (_cache && now - _cacheAt < CACHE_TTL_MS) return _cache;
-
-  const apiKey = process.env.DART_API_KEY;
-  if (!apiKey) throw new Error("DART_API_KEY is missing");
-
-  const url = `https://opendart.fss.or.kr/api/corpCode.xml?crtfc_key=${encodeURIComponent(
-    apiKey
-  )}`;
-
-  const res = await fetch(url, { cache: "no-store" });
-  if (!res.ok) {
-    throw new Error(`DART corpCode.xml fetch failed: ${res.status} ${res.statusText}`);
-  }
-
-  const buf = Buffer.from(await res.arrayBuffer());
-
-  const zip = new AdmZip(buf);
-
-  // DART zip 내부 파일명은 일반적으로 CORPCODE.xml
-  const entry =
-    zip.getEntry("CORPCODE.xml") ||
-    zip.getEntries().find((e) => e.entryName.toLowerCase().endsWith(".xml"));
-
-  if (!entry) throw new Error("CORPCODE.xml not found inside zip");
-
-  const xml = entry.getData().toString("utf8");
-
-  // ✅ 핵심: parseTagValue:false 로 숫자/불리언 자동 변환 방지
-  const parser = new XMLParser({
-    ignoreAttributes: false,
-    parseTagValue: false,
-    parseAttributeValue: false,
-    trimValues: false,
-  });
-
-  const parsed: any = parser.parse(xml);
-
-  const listRaw = parsed?.result?.list;
-  const list = Array.isArray(listRaw) ? listRaw : listRaw ? [listRaw] : [];
-
-  const map = new Map<string, string>();
-
-  for (const e of list) {
-    const stock_code = normalizeStockCode(asText(e?.stock_code));
-    const corp_code = normalizeCorpCode(asText(e?.corp_code));
-
-    if (stock_code && corp_code) {
-      map.set(stock_code, corp_code);
+    // DART는 보통 status:"000" 성공
+    if (data?.status && data.status !== "000") {
+      return jsonError(502, "DART returned error", {
+        ticker,
+        corp_code,
+        dart_status: data.status,
+        dart_message: data.message,
+      });
     }
+
+    return NextResponse.json(
+      {
+        status: "ok",
+        message: "success",
+        ticker: ticker.padStart(6, "0"),
+        corp_code,
+        source: "dart",
+        data,
+      },
+      {
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store",
+        },
+      }
+    );
+  } catch (e: any) {
+    return jsonError(500, "fundamentals route crashed", {
+      ticker,
+      corp_code,
+      detail: e?.name === "AbortError" ? "timeout" : e?.message ?? String(e),
+    });
   }
-
-  _cache = map;
-  _cacheAt = now;
-  return map;
-}
-
-export async function getCorpCodeByTicker(ticker: string): Promise<string | null> {
-  const t = (ticker ?? "").trim();
-  if (!/^\d{6}$/.test(t)) return null;
-
-  const map = await loadCorpMap();
-  return map.get(t) ?? null;
-}
-
-export function _debug_clearCorpMapCache() {
-  _cache = null;
-  _cacheAt = 0;
 }
