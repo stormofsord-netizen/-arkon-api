@@ -5,7 +5,7 @@ export const dynamic = "force-dynamic";
 
 export async function GET() {
   const schema = {
-    openapi: "3.0.3",
+    openapi: "3.1.0",
     info: {
       title: "arkon-api",
       version: "0.1.0",
