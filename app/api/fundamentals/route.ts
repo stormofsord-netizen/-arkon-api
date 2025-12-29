@@ -1,72 +1,139 @@
 // app/api/fundamentals/route.ts
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 import { NextResponse } from "next/server";
 import { getCorpCodeByTicker } from "@/app/lib/corpMap";
 
-function jsonError(status: number, message: string, extra?: Record<string, any>) {
+const DART_ENDPOINT =
+  "https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json";
+
+function jsonError(
+  httpStatus: number,
+  message: string,
+  extra?: Record<string, unknown>
+) {
   return NextResponse.json(
     { status: "error", message, ...(extra ?? {}) },
-    { status, headers: { "Cache-Control": "no-store" } }
+    {
+      status: httpStatus,
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "no-store",
+      },
+    }
+  );
+}
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit & { timeoutMs?: number } = {}
+) {
+  const { timeoutMs = 15000, ...rest } = init;
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(url, { ...rest, signal: controller.signal });
+    return res;
+  } finally {
+    clearTimeout(id);
+  }
+}
+
+function pickEnvApiKey() {
+  // 혹시 키 이름을 다르게 넣었을 가능성까지 방어
+  return (
+    process.env.DART_API_KEY ||
+    process.env.DART_APIKEY ||
+    process.env.DART_KEY ||
+    ""
   );
 }
 
 export async function GET(req: Request) {
   try {
-    const url = new URL(req.url);
+    const { searchParams } = new URL(req.url);
 
-    const ticker = (url.searchParams.get("ticker") || "").trim();
-    if (!ticker) return jsonError(400, "ticker(query)가 필요합니다.");
+    const ticker = (searchParams.get("ticker") || "").trim();
+    if (!/^\d{6}$/.test(ticker)) {
+      return jsonError(400, "ticker must be 6 digits (e.g. 005930)", { ticker });
+    }
 
-    const bsns_year = (url.searchParams.get("bsns_year") || "2024").trim();
-    const reprt_code = (url.searchParams.get("reprt_code") || "11011").trim();
-    const fs_div = (url.searchParams.get("fs_div") || "CFS").trim();
+    const bsns_year =
+      (searchParams.get("bsns_year") || "").trim() ||
+      String(new Date().getFullYear() - 1);
 
-    const apiKey =
-      process.env.DART_API_KEY ||
-      process.env.DART_APIKEY ||
-      process.env.DART_CRTFC_KEY ||
-      "";
+    const reprt_code = (searchParams.get("reprt_code") || "").trim() || "11011";
+    const fs_div = (searchParams.get("fs_div") || "").trim() || "CFS";
 
+    const apiKey = pickEnvApiKey();
     if (!apiKey) {
-      return jsonError(500, "서버에 DART_API_KEY 환경변수가 없습니다.");
+      return jsonError(500, "DART_API_KEY is missing in environment variables");
     }
 
-    // ✅ 핵심: corp_code 자동 조회 (전 종목 대응)
-    const corp_code = await getCorpCodeByTicker(ticker);
-    if (!corp_code) {
-      return jsonError(
-        400,
-        `corp_code not found for ticker=${ticker} (DART corpCode.xml 기준)`,
-        { ticker }
-      );
-    }
-
-    const dartUrl = "https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json";
-    const params = new URLSearchParams({
-      crtfc_key: apiKey,
-      corp_code,
-      bsns_year,
-      reprt_code,
-      fs_div,
-    });
-
-    const res = await fetch(`${dartUrl}?${params.toString()}`, {
-      cache: "no-store",
-    });
-
-    if (!res.ok) {
-      return jsonError(500, `DART 호출 실패: HTTP ${res.status}`, {
+    // corp_code 해결 (여기서 터지면 INTERNAL_FUNCTION_INVOCATION_FAILED 잘 뜸)
+    let corp_code: string | null = null;
+    try {
+      corp_code = await getCorpCodeByTicker(ticker);
+    } catch (e: any) {
+      return jsonError(500, "corp_code resolver crashed (corpMap.ts)", {
         ticker,
-        corp_code,
+        detail: String(e?.message || e),
       });
     }
 
-    const data = await res.json();
+    if (!corp_code) {
+      return jsonError(404, "corp_code not found for ticker", { ticker });
+    }
 
-    // DART가 자체적으로 status/message를 주는 케이스(예: 013 등)도 그대로 전달
+    const url = new URL(DART_ENDPOINT);
+    url.searchParams.set("crtfc_key", apiKey);
+    url.searchParams.set("corp_code", corp_code);
+    url.searchParams.set("bsns_year", bsns_year);
+    url.searchParams.set("reprt_code", reprt_code);
+    url.searchParams.set("fs_div", fs_div);
+
+    const res = await fetchWithTimeout(url.toString(), {
+      method: "GET",
+      timeoutMs: 15000,
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      return jsonError(502, `DART upstream HTTP ${res.status}`, {
+        ticker,
+        corp_code,
+        upstream_status: res.status,
+        upstream_body: text.slice(0, 500),
+      });
+    }
+
+    let data: any;
+    try {
+      data = await res.json();
+    } catch {
+      const text = await res.text().catch(() => "");
+      return jsonError(502, "DART response is not valid JSON", {
+        ticker,
+        corp_code,
+        upstream_body: text.slice(0, 500),
+      });
+    }
+
+    // DART 표준: status === "000" 이 정상
+    if (typeof data?.status === "string" && data.status !== "000") {
+      return jsonError(502, `DART error ${data.status}: ${data.message ?? ""}`, {
+        ticker,
+        corp_code,
+        dart_status: data.status,
+        dart_message: data.message,
+      });
+    }
+
     return NextResponse.json(
       {
         status: "ok",
-        message: "ok",
         ticker,
         corp_code,
         source: "dart",
@@ -80,6 +147,8 @@ export async function GET(req: Request) {
       }
     );
   } catch (e: any) {
-    return jsonError(500, e?.message || "unknown error");
+    return jsonError(500, "Unhandled server error", {
+      detail: String(e?.message || e),
+    });
   }
 }
