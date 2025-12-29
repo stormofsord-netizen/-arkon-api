@@ -2,105 +2,113 @@
 import AdmZip from "adm-zip";
 import { XMLParser } from "fast-xml-parser";
 
-type CorpRow = {
-  corp_code?: string;
-  corp_name?: string;
-  stock_code?: string;
-  modify_date?: string;
-};
+let _cache: Map<string, string> | null = null;
+let _cacheAt = 0;
 
-function normalizeTicker(input: string): string {
-  const t = (input ?? "").trim();
-  // "660" -> "000660" 같은 케이스 방어
-  if (/^\d{1,6}$/.test(t)) return t.padStart(6, "0");
-  return t; // 혹시 이미 6자리 이상 들어오면 그대로
-}
+// 서버리스 환경에서 너무 자주 받지 않게 24시간 캐시 (인스턴스 기준)
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
-// Vercel/Node에서 재사용되는 전역 캐시
-declare global {
-  // eslint-disable-next-line no-var
-  var __ARKON_CORP_MAP__: Map<string, string> | undefined;
-}
+function asText(v: any): string {
+  if (v === null || v === undefined) return "";
+  if (typeof v === "string") return v;
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
 
-/**
- * DART corpCode.xml(Zip)에서 stock_code(티커) -> corp_code 매핑을 자동 생성/캐시
- */
-async function loadCorpMapFromDart(): Promise<Map<string, string>> {
-  if (globalThis.__ARKON_CORP_MAP__) return globalThis.__ARKON_CORP_MAP__;
-
-  const apiKey =
-    process.env.DART_API_KEY ||
-    process.env.DART_APIKEY ||
-    process.env.DART_CRTFC_KEY ||
-    "";
-
-  if (!apiKey) {
-    throw new Error(
-      "DART_API_KEY 환경변수가 없습니다. (Vercel/로컬 .env.local 확인)"
-    );
+  // fast-xml-parser 설정/버전에 따라 object 형태로 올 수도 있어서 방어
+  if (typeof v === "object") {
+    if (typeof v["#text"] === "string") return v["#text"];
+    if (typeof v["text"] === "string") return v["text"];
+    if (typeof v["value"] === "string") return v["value"];
+    // 마지막 방어
+    try {
+      return String(v);
+    } catch {
+      return "";
+    }
   }
+  return "";
+}
 
-  // DART: corpCode.xml 은 ZIP으로 내려옴
-  const url = `https://opendart.fss.or.kr/api/corpCode.xml?crtfc_key=${apiKey}`;
+function normalizeStockCode(code: string): string {
+  const s = (code ?? "").trim();
+  if (!s) return "";
+  // DART의 stock_code는 보통 6자리지만 혹시 모자라면 0 패딩
+  return s.padStart(6, "0");
+}
+
+function normalizeCorpCode(code: string): string {
+  const s = (code ?? "").trim();
+  if (!s) return "";
+  // corp_code는 8자리
+  return s.padStart(8, "0");
+}
+
+async function loadCorpMap(): Promise<Map<string, string>> {
+  const now = Date.now();
+  if (_cache && now - _cacheAt < CACHE_TTL_MS) return _cache;
+
+  const apiKey = process.env.DART_API_KEY;
+  if (!apiKey) throw new Error("DART_API_KEY is missing");
+
+  const url = `https://opendart.fss.or.kr/api/corpCode.xml?crtfc_key=${encodeURIComponent(
+    apiKey
+  )}`;
+
   const res = await fetch(url, { cache: "no-store" });
-
   if (!res.ok) {
-    throw new Error(`DART corpCode.xml 다운로드 실패: ${res.status}`);
+    throw new Error(`DART corpCode.xml fetch failed: ${res.status} ${res.statusText}`);
   }
 
   const buf = Buffer.from(await res.arrayBuffer());
+
   const zip = new AdmZip(buf);
 
-  // ZIP 내부 파일명이 CORPCODE.xml 인 경우가 일반적이라 둘 다 탐색
+  // DART zip 내부 파일명은 일반적으로 CORPCODE.xml
   const entry =
     zip.getEntry("CORPCODE.xml") ||
-    zip.getEntry("corpCode.xml") ||
-    zip
-      .getEntries()
-      .find((e) => e.entryName.toLowerCase().endsWith(".xml"));
+    zip.getEntries().find((e) => e.entryName.toLowerCase().endsWith(".xml"));
 
-  if (!entry) {
-    throw new Error("corpCode ZIP 안에서 XML 파일을 찾지 못했습니다.");
-  }
+  if (!entry) throw new Error("CORPCODE.xml not found inside zip");
 
-  const xml = entry.getData().toString("utf-8");
+  const xml = entry.getData().toString("utf8");
 
+  // ✅ 핵심: parseTagValue:false 로 숫자/불리언 자동 변환 방지
   const parser = new XMLParser({
-    ignoreAttributes: true,
-    // 값이 하나여도 array로 맞춰서 처리 편하게
-    isArray: (name) => name === "list",
+    ignoreAttributes: false,
+    parseTagValue: false,
+    parseAttributeValue: false,
+    trimValues: false,
   });
 
-  const parsed = parser.parse(xml) as any;
+  const parsed: any = parser.parse(xml);
 
-  // 구조: <result><list>...</list></result>
-  const rows: CorpRow[] =
-    parsed?.result?.list ??
-    parsed?.result?.["list"] ??
-    parsed?.["result"]?.list ??
-    [];
+  const listRaw = parsed?.result?.list;
+  const list = Array.isArray(listRaw) ? listRaw : listRaw ? [listRaw] : [];
 
   const map = new Map<string, string>();
-  for (const r of rows) {
-    const stock = (r.stock_code ?? "").trim();
-    const corp = (r.corp_code ?? "").trim();
 
-    // stock_code 없는 법인도 많아서 걸러야 함
-    if (!stock || stock.length !== 6) continue;
-    if (!corp || corp.length !== 8) continue;
+  for (const e of list) {
+    const stock_code = normalizeStockCode(asText(e?.stock_code));
+    const corp_code = normalizeCorpCode(asText(e?.corp_code));
 
-    map.set(stock, corp);
+    if (stock_code && corp_code) {
+      map.set(stock_code, corp_code);
+    }
   }
 
-  globalThis.__ARKON_CORP_MAP__ = map;
+  _cache = map;
+  _cacheAt = now;
   return map;
 }
 
-export async function getCorpCodeByTicker(
-  ticker: string
-): Promise<string | null> {
-  const t = normalizeTicker(ticker);
+export async function getCorpCodeByTicker(ticker: string): Promise<string | null> {
+  const t = (ticker ?? "").trim();
+  if (!/^\d{6}$/.test(t)) return null;
 
-  const map = await loadCorpMapFromDart();
+  const map = await loadCorpMap();
   return map.get(t) ?? null;
+}
+
+export function _debug_clearCorpMapCache() {
+  _cache = null;
+  _cacheAt = 0;
 }
