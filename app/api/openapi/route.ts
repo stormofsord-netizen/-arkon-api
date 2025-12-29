@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 export async function GET() {
   const schema = {
-    openapi: "3.1.0",
+    openapi: "3.0.3",
     info: {
       title: "arkon-api",
       version: "0.1.0",
@@ -10,9 +10,8 @@ export async function GET() {
         "ARKON-JANUS automation API. Provides DART fundamentals via Next.js route handlers.",
     },
     servers: [
-      { url: "https://arkon-api.vercel.app" },
-      { url: "http://localhost:3000" },
-    ],
+  { url: "https://arkon-api.vercel.app" }
+],
     paths: {
       "/api/fundamentals": {
         get: {
