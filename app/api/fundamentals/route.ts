@@ -7,26 +7,23 @@ export async function GET(req: Request) {
 
     if (!ticker) {
       return NextResponse.json(
-        { status: "error", message: "ticker is required" },
+        { status: "error", message: "ticker required" },
         { status: 400 }
       );
     }
 
-    // 1단계: 외부 API / DART / fetch 전부 금지
-    // 무조건 JSON만 반환
-
+    // 🔹 STEP-2: 실제 로직은 여기부터 확장
+    // 지금은 테스트용
     return NextResponse.json({
       status: "ok",
       ticker,
-      service: "arkon-api",
-      step: "step-1-json-only",
+      stage: "step-2-ready",
+      note: "real fundamentals logic will be attached here",
     });
+
   } catch (e: any) {
     return NextResponse.json(
-      {
-        status: "error",
-        message: e?.message ?? "unknown error",
-      },
+      { status: "error", message: e.message },
       { status: 500 }
     );
   }
