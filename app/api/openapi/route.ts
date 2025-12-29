@@ -1,17 +1,22 @@
 import { NextResponse } from "next/server";
 
+// 캐시/정적화로 꼬이는 것 방지
+export const dynamic = "force-dynamic";
+
 export async function GET() {
+  // ⚠️ 중요: GPTs Actions가 "servers"를 엄격하게 봄.
+  // - localhost 제거
+  // - https 도메인 1개만
+  // - openapi 버전 3.1.0 권장
   const schema = {
-    openapi: "3.0.3",
+    openapi: "3.1.0",
     info: {
       title: "arkon-api",
       version: "0.1.0",
       description:
         "ARKON-JANUS automation API. Provides DART fundamentals via Next.js route handlers.",
     },
-    servers: [
-  { url: "https://arkon-api.vercel.app" }
-],
+    servers: [{ url: "https://arkon-api.vercel.app" }],
     paths: {
       "/api/fundamentals": {
         get: {
@@ -38,14 +43,14 @@ export async function GET() {
               required: false,
               schema: { type: "string", example: "11011" },
               description:
-                "Report code (e.g., 11011 annual, 11012 half, 11013 Q3, 11014 Q1)",
+                "Report code (11011 annual, 11012 half, 11013 Q3, 11014 Q1)",
             },
             {
               name: "fs_div",
               in: "query",
               required: false,
               schema: { type: "string", example: "CFS" },
-              description: "Financial statement type (CFS/..)",
+              description: "Financial statement type (CFS/OFS etc.)",
             },
           ],
           responses: {
@@ -63,7 +68,7 @@ export async function GET() {
                       source: { type: "string", example: "dart" },
                       data: { type: "object", description: "Raw DART payload" },
                     },
-                    required: ["status"],
+                    required: ["status", "ticker", "source"],
                   },
                 },
               },
@@ -76,7 +81,7 @@ export async function GET() {
                     type: "object",
                     properties: {
                       status: { type: "string", example: "error" },
-                      message: { type: "string" },
+                      message: { type: "string", example: "ticker is required" },
                     },
                     required: ["status", "message"],
                   },
@@ -91,7 +96,7 @@ export async function GET() {
                     type: "object",
                     properties: {
                       status: { type: "string", example: "error" },
-                      message: { type: "string" },
+                      message: { type: "string", example: "internal error" },
                     },
                     required: ["status", "message"],
                   },
@@ -106,7 +111,6 @@ export async function GET() {
 
   return NextResponse.json(schema, {
     headers: {
-      // GPTs에서 읽기 편하게 JSON 고정
       "Content-Type": "application/json; charset=utf-8",
       "Cache-Control": "no-store",
     },
