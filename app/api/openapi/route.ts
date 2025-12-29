@@ -1,3 +1,4 @@
+export const runtime = "nodejs";
 import { NextResponse } from "next/server";
 
 // 캐시 끄기(스키마는 항상 최신으로)
