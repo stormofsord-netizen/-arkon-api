@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 export async function GET() {
   const schema = {
-    openapi: "3.1.0",
+    openapi: "3.0.3",
     info: {
       title: "arkon-api",
       version: "0.1.0",
@@ -12,7 +12,6 @@ export async function GET() {
     servers: [
       {
         url: "https://arkon-api.vercel.app",
-        description: "Production (Vercel)",
       },
     ],
     paths: {
@@ -56,8 +55,9 @@ export async function GET() {
                     type: "object",
                     properties: {
                       status: { type: "string", example: "ok" },
-                      ticker: { type: "string", example: "005930" },
-                      corp_code: { type: "string", example: "00126380" },
+                      message: { type: "string" },
+                      ticker: { type: "string" },
+                      corp_code: { type: "string" },
                       source: { type: "string", example: "dart" },
                       data: { type: "object" },
                     },
@@ -65,12 +65,6 @@ export async function GET() {
                   },
                 },
               },
-            },
-            "400": {
-              description: "Bad Request",
-            },
-            "500": {
-              description: "Server Error",
             },
           },
         },
