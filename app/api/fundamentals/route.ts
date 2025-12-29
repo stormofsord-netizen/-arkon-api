@@ -1,73 +1,85 @@
+// app/api/fundamentals/route.ts
 import { NextResponse } from "next/server";
 import { getCorpCodeByTicker } from "@/app/lib/corpMap";
 
-export const runtime = "nodejs"; // DART 호출은 node 런타임이 안전함
-
-type DartError = { status?: string; message?: string };
-
-function jsonError(message: string, status = 400, extra?: Record<string, unknown>) {
+function jsonError(status: number, message: string, extra?: Record<string, any>) {
   return NextResponse.json(
     { status: "error", message, ...(extra ?? {}) },
-    { status }
+    { status, headers: { "Cache-Control": "no-store" } }
   );
 }
 
 export async function GET(req: Request) {
   try {
-    const { searchParams } = new URL(req.url);
+    const url = new URL(req.url);
 
-    const ticker = searchParams.get("ticker")?.trim();
-    if (!ticker) return jsonError("ticker is required", 400);
+    const ticker = (url.searchParams.get("ticker") || "").trim();
+    if (!ticker) return jsonError(400, "ticker(query)가 필요합니다.");
 
-    const DART_API_KEY = process.env.DART_API_KEY;
-    if (!DART_API_KEY) return jsonError("DART_API_KEY is missing in environment variables", 500);
+    const bsns_year = (url.searchParams.get("bsns_year") || "2024").trim();
+    const reprt_code = (url.searchParams.get("reprt_code") || "11011").trim();
+    const fs_div = (url.searchParams.get("fs_div") || "CFS").trim();
 
-    // DART 재무제표 API 파라미터
-    // - bsns_year: 사업연도 (예: 2024)
-    // - reprt_code: 11011(사업보고서/연간), 11012(반기), 11013(1분기), 11014(3분기)
-    // - fs_div: CFS(연결) / OFS(별도)
-    const bsns_year = (searchParams.get("bsns_year") ?? "").trim() || String(new Date().getFullYear() - 1);
-    const reprt_code = (searchParams.get("reprt_code") ?? "").trim() || "11011";
-    const fs_div = (searchParams.get("fs_div") ?? "").trim() || "CFS";
+    const apiKey =
+      process.env.DART_API_KEY ||
+      process.env.DART_APIKEY ||
+      process.env.DART_CRTFC_KEY ||
+      "";
 
-    const corp_code = getCorpCodeByTicker(ticker);
+    if (!apiKey) {
+      return jsonError(500, "서버에 DART_API_KEY 환경변수가 없습니다.");
+    }
+
+    // ✅ 핵심: corp_code 자동 조회 (전 종목 대응)
+    const corp_code = await getCorpCodeByTicker(ticker);
     if (!corp_code) {
-      return jsonError("corp_code not found for ticker (corpMap.ts 확인 필요)", 400, { ticker });
+      return jsonError(
+        400,
+        `corp_code not found for ticker=${ticker} (DART corpCode.xml 기준)`,
+        { ticker }
+      );
     }
 
-    // fnlttSinglAcnt: 단일회사 주요계정 재무제표(요약)
-    const url = new URL("https://opendart.fss.or.kr/api/fnlttSinglAcnt.json");
-    url.searchParams.set("crtfc_key", DART_API_KEY);
-    url.searchParams.set("corp_code", corp_code);
-    url.searchParams.set("bsns_year", bsns_year);
-    url.searchParams.set("reprt_code", reprt_code);
-    url.searchParams.set("fs_div", fs_div);
-
-    const upstream = await fetch(url.toString(), { method: "GET" });
-    const text = await upstream.text();
-
-    // DART가 장애 시 HTML/텍스트를 줄 때가 있어 → JSON 파싱 보호
-    let data: unknown;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      return jsonError("Upstream(DART) returned non-JSON response", 502, { preview: text.slice(0, 120) });
-    }
-
-    const d = data as DartError;
-
-    // DART status != 000 이면 그대로 내려서 원인 파악 가능하게
-    return NextResponse.json({
-      status: "ok",
-      ticker,
+    const dartUrl = "https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json";
+    const params = new URLSearchParams({
+      crtfc_key: apiKey,
       corp_code,
-      source: "dart.fnlttSinglAcnt",
-      request: { bsns_year, reprt_code, fs_div },
-      data,
-      dart_status: d?.status ?? null,
-      dart_message: d?.message ?? null,
+      bsns_year,
+      reprt_code,
+      fs_div,
     });
+
+    const res = await fetch(`${dartUrl}?${params.toString()}`, {
+      cache: "no-store",
+    });
+
+    if (!res.ok) {
+      return jsonError(500, `DART 호출 실패: HTTP ${res.status}`, {
+        ticker,
+        corp_code,
+      });
+    }
+
+    const data = await res.json();
+
+    // DART가 자체적으로 status/message를 주는 케이스(예: 013 등)도 그대로 전달
+    return NextResponse.json(
+      {
+        status: "ok",
+        message: "ok",
+        ticker,
+        corp_code,
+        source: "dart",
+        data,
+      },
+      {
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store",
+        },
+      }
+    );
   } catch (e: any) {
-    return jsonError("Unhandled server error", 500, { detail: String(e?.message ?? e) });
+    return jsonError(500, e?.message || "unknown error");
   }
 }
