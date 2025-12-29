@@ -1,3 +1,4 @@
+// app/api/fundamentals/route.ts
 import { NextResponse } from "next/server";
 
 export async function GET(req: Request) {
@@ -11,10 +12,24 @@ export async function GET(req: Request) {
     );
   }
 
-  return NextResponse.json({
-    status: "ok",
-    ticker,
-    source: "arkon-api",
-    message: "API route is working",
-  });
+  const BASE = process.env.ARKON_UPSTREAM_URL;
+  if (!BASE) {
+    return NextResponse.json(
+      { status: "error", message: "ARKON_UPSTREAM_URL not set" },
+      { status: 500 }
+    );
+  }
+
+  const url = `${BASE}/api/fundamentals?ticker=${ticker}`;
+
+  try {
+    const res = await fetch(url, { cache: "no-store" });
+    const data = await res.json();
+    return NextResponse.json(data);
+  } catch (e: any) {
+    return NextResponse.json(
+      { status: "error", message: e?.message || "fetch failed" },
+      { status: 500 }
+    );
+  }
 }
