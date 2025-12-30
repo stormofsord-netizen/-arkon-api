@@ -5,6 +5,8 @@ export async function analyzeRisk(fusedData: any, newsTitles: string[]) {
     factors: [] as string[],
     news_summary: [] as string[],
     debt_ratio: 0,
+    equity_ratio: 0,
+    current_ratio: 0
   };
 
   try {
@@ -15,41 +17,45 @@ export async function analyzeRisk(fusedData: any, newsTitles: string[]) {
       const data = fusedData[latestYear];
       const bs = data.BS || [];
       
-      const findAmount = (ids: string[], names: string[]) => {
-        let item = bs.find((x: any) => ids.includes(x.account_id));
-        if (!item) {
-          item = bs.find((x: any) => {
-            const cleanName = x.account_nm?.replace(/\s/g, "") || "";
-            return names.some(n => cleanName === n || cleanName.includes(n));
-          });
-        }
+      const findAmount = (keywords: string[]) => {
+        const item = bs.find((x: any) => {
+          const id = (x.account_id || "").toLowerCase();
+          const name = (x.account_nm || "").replace(/\s/g, "");
+          return keywords.some(k => id.includes(k) || name === k);
+        });
         return item ? Number(String(item.amount || item.thstrm_amount || "0").replace(/,/g, "")) : 0;
       };
 
-      // 1. 자산, 부채 찾기
-      const assets = findAmount(["ifrs-full_Assets"], ["자산총계", "자산"]);
-      const liabilities = findAmount(["ifrs-full_Liabilities"], ["부채총계", "부채"]);
-      
-      // 2. 🔥 [핵심] 자본 = 자산 - 부채
-      let equity = assets - liabilities;
-      
-      // 백업 로직 (혹시나 해서 남겨둠)
-      if (equity <= 0) {
-         equity = findAmount(["ifrs-full_Equity"], ["자본총계"]);
+      const assets = findAmount(["assets", "totalassets", "자산총계", "자산"]);
+      const liabilities = findAmount(["liabilities", "totalliabilities", "부채총계", "부채"]);
+      const currentAssets = findAmount(["currentassets", "유동자산"]);
+      const currentLiabilities = findAmount(["currentliabilities", "유동부채"]);
+
+      // 🔥 자본 = 자산 - 부채 (강제 계산)
+      let equity = 0;
+      if (assets > 0 && liabilities > 0) {
+        equity = assets - liabilities;
       }
 
+      // 지표 계산
       if (equity > 0) {
         riskReport.debt_ratio = (liabilities / equity) * 100;
-        
-        // 부채비율 리스크 판정 (200% 초과 시)
-        if (riskReport.debt_ratio > 200) {
-          riskReport.score -= 2;
-          riskReport.factors.push(`⚠️ 부채비율 높음 (${riskReport.debt_ratio.toFixed(1)}%)`);
-        }
-      } else {
-         // 자본이 0 이하(자본잠식)인 경우
-         riskReport.score -= 5;
-         riskReport.factors.push("🚨 자본잠식 의심 (Equity <= 0)");
+        riskReport.equity_ratio = (equity / assets) * 100; // 자본비율 추가
+      }
+      
+      if (currentLiabilities > 0) {
+        riskReport.current_ratio = (currentAssets / currentLiabilities) * 100;
+      }
+
+      // 리스크 판정 로직
+      if (riskReport.debt_ratio > 200) {
+        riskReport.score -= 3;
+        riskReport.factors.push(`⚠️ 부채비율 높음 (${riskReport.debt_ratio.toFixed(1)}%)`);
+      }
+      
+      if (riskReport.current_ratio > 0 && riskReport.current_ratio < 100) {
+        riskReport.score -= 2;
+        riskReport.factors.push(`⚠️ 유동비율 취약 (${riskReport.current_ratio.toFixed(1)}%)`);
       }
     }
   } catch (e) {
@@ -74,6 +80,7 @@ export async function analyzeRisk(fusedData: any, newsTitles: string[]) {
     riskReport.factors.push(`⚠️ 악재성 뉴스 ${badNewsCount}건 감지`);
   }
 
+  // 등급
   if (riskReport.score <= 4) riskReport.alert = "위험 (KILL)";
   else if (riskReport.score <= 7) riskReport.alert = "주의 (CAUTION)";
   else riskReport.alert = "안정 (GO)";
