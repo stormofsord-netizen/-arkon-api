@@ -2,7 +2,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-// ✅ 경로가 올바른지 확인 (@/lib)
+// ✅ 라이브러리 경로 확인 (@/lib)
 import { fetchFundamentalsFusion } from "@/lib/dartHandler";
 import { fuseFinancials } from "@/lib/financialFusion";
 import { analyzeValuation } from "@/lib/financialAnalyzer";
@@ -27,8 +27,8 @@ export async function GET(req: Request) {
 
     console.log(`[API] Starting Full Report for ${ticker}`);
 
-    // 1️⃣ 펀더멘털 + 시장 데이터(주가, 차트) 수집
-    // (dartHandler가 내부적으로 priceFetcher를 호출해서 history까지 가져옵니다)
+    // 1️⃣ 펀더멘털 + 시장 데이터(주가, 차트) + 뉴스 수집
+    // (dartHandler가 내부적으로 priceFetcher와 newsFetcher를 모두 호출합니다)
     const dartDataset = await fetchFundamentalsFusion(ticker);
     
     if (!dartDataset || !dartDataset.data) {
@@ -48,11 +48,11 @@ export async function GET(req: Request) {
     // 4️⃣ 밸류에이션 분석 (실시간 시총 반영)
     const valuation = analyzeValuation(fused, dartDataset.marketCap);
 
-    // 5️⃣ 리스크 분석 (뉴스 데이터는 추후 연동, 현재는 빈 배열)
-    const risk = await analyzeRisk(fused, []);
+    // ✅ 5️⃣ 리스크 분석 (뉴스 데이터 연동 완료!)
+    // dartHandler에서 가져온 최신 뉴스 제목들을 리스크 분석기에 전달합니다.
+    const risk = await analyzeRisk(fused, dartDataset.news || []);
 
-    // ✅ 6️⃣ 퀀트 분석 (네이버에서 가져온 1년치 일봉 데이터 입력)
-    // dartDataset.history가 없으면 빈 배열로 처리하여 에러 방지
+    // ✅ 6️⃣ 퀀트 분석 (네이버 1년치 일봉 데이터 연동 완료!)
     const quant = await analyzeQuant(dartDataset.history || []);
 
     // 7️⃣ 리포트 통합 (텍스트 생성)
@@ -79,8 +79,8 @@ export async function GET(req: Request) {
         marketCap: dartDataset.marketCap, // 실시간 시가총액
         price: dartDataset.price,         // 실시간 주가
         fundamental: report?.fundamental ?? null,
-        risk,
-        quant, // 지지/저항, ATR 등 포함됨
+        risk, // 뉴스 분석 결과 포함됨
+        quant, // 지지/저항, ATR 포함됨
         summary,
       },
       {
