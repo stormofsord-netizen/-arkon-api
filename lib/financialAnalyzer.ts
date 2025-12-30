@@ -1,115 +1,78 @@
-/**
- * 📘 financialAnalyzer.ts
- * ARKON-JANUS v3.6.3 (2025 기준)
- *
- * 기능:
- * 1️⃣ fuseFinancials() 결과(FusedFinancials)에서 계정명별 금액 추출
- * 2️⃣ 최신 연도 기준으로 PER, PBR, FCF Yield 계산
- * 3️⃣ ROE, ROA, 영업이익률 등 수익성 지표 산출
- * 4️⃣ Valuation 스코어링 및 밸류 괴리 판정
- */
-
-type FusedFinancials = Record<string, Record<string, number>>;
-
-export type ValuationResult = {
-  asof: string;
-  per?: number | null;
-  pbr?: number | null;
-  roe?: number | null;
-  roa?: number | null;
-  opm?: number | null;
-  fcf_yield?: number | null;
-  score: string; // "저평가", "적정", "고평가"
-  commentary: string;
-};
-
-/**
- * 안전 숫자 변환
- */
-function n(v: any): number {
-  if (v === null || v === undefined) return 0;
-  const num = Number(String(v).replace(/,/g, ""));
-  return isNaN(num) ? 0 : num;
-}
-
-/**
- * 주요 항목 이름 매핑
- */
-const KEYS = {
-  revenue: ["매출액", "영업수익", "매출"],
-  operatingIncome: ["영업이익", "영업손익"],
-  netIncome: ["당기순이익", "지배주주순이익"],
-  totalAssets: ["자산총계", "총자산"],
-  totalEquity: ["자본총계", "자본"],
-  operatingCF: ["영업활동현금흐름", "영업현금흐름"],
-  marketCap: ["시가총액", "MarketCap"],
-};
-
-/**
- * FusedFinancials에서 특정 계정의 최신 연도 금액을 추출
- */
-function getLatestValue(fused: FusedFinancials, aliases: string[]): number {
-  for (const alias of aliases) {
-    const row = fused[alias];
-    if (row) {
-      const years = Object.keys(row);
-      const latestYear = Math.max(...years.map((y) => Number(y)));
-      return n(row[latestYear]);
-    }
-  }
-  return 0;
-}
-
-/**
- * 밸류에이션 및 수익성 계산
- */
-export function analyzeValuation(
-  fused: FusedFinancials,
-  marketCap?: number
-): ValuationResult {
-  const rev = getLatestValue(fused, KEYS.revenue);
-  const op = getLatestValue(fused, KEYS.operatingIncome);
-  const ni = getLatestValue(fused, KEYS.netIncome);
-  const eq = getLatestValue(fused, KEYS.totalEquity);
-  const as = getLatestValue(fused, KEYS.totalAssets);
-  const cf = getLatestValue(fused, KEYS.operatingCF);
-
-  const mc = n(marketCap);
-
-  // 기본 지표 계산
-  const per = ni > 0 && mc > 0 ? mc / ni : null;
-  const pbr = eq > 0 && mc > 0 ? mc / eq : null;
-  const roe = eq > 0 && ni > 0 ? (ni / eq) * 100 : null;
-  const roa = as > 0 && ni > 0 ? (ni / as) * 100 : null;
-  const opm = rev > 0 && op > 0 ? (op / rev) * 100 : null;
-  const fcf_yield = cf > 0 && mc > 0 ? (cf / mc) * 100 : null;
-
-  // 간단한 밸류 스코어링
-  let score = "적정";
-  if (per && per < 10 && pbr && pbr < 1) score = "저평가";
-  else if (per && per > 25 && pbr && pbr > 2) score = "고평가";
-
-  const commentary = [
-    per ? `PER: ${per.toFixed(2)}` : "PER: N/A",
-    pbr ? `PBR: ${pbr.toFixed(2)}` : "PBR: N/A",
-    roe ? `ROE: ${roe.toFixed(2)}%` : "ROE: N/A",
-    opm ? `영업이익률: ${opm.toFixed(2)}%` : "영업이익률: N/A",
-  ].join(" | ");
-
-  const latestYear = Math.max(
-    ...Object.values(fused)
-      .map((v) => Math.max(...Object.keys(v).map((y) => Number(y))))
-  );
-
-  return {
-    asof: `${latestYear}년 기준`,
-    per,
-    pbr,
-    roe,
-    roa,
-    opm,
-    fcf_yield,
-    score,
-    commentary,
+export function analyzeValuation(fusedData: any, marketCap: number) {
+  const result = {
+    per: "N/A", pbr: "N/A", roe: "N/A", roa: "N/A", opm: "N/A", fcf_yield: "N/A",
+    score: 0, asof: "최신 데이터 기준"
   };
+
+  try {
+    const years = Object.keys(fusedData).map(Number).sort((a, b) => b - a);
+    const latestYear = years[0];
+    if (!latestYear) return result;
+
+    const data = fusedData[latestYear];
+    const bs = data.BS || [];
+    const is = data.IS || [];
+    const cf = data.CF || [];
+
+    // ✅ [핵심] 엄격한 매핑 & 숫자 변환 함수
+    const findAmount = (list: any[], ids: string[], names: string[]) => {
+      // 1. 표준 ID로 찾기 (가장 정확)
+      let item = list.find((x: any) => ids.includes(x.account_id));
+      
+      // 2. 이름으로 찾기 (공백 제거 후 정확히 일치하는 것만)
+      if (!item) {
+        item = list.find((x: any) => names.includes(x.account_nm?.replace(/\s/g, "")));
+      }
+      
+      if (!item) return 0;
+
+      // 3. 숫자 변환 (쉼표 제거)
+      const val = Number(String(item.amount || item.thstrm_amount || "0").replace(/,/g, ""));
+      
+      // 4. 단위 보정 (DART API는 기본 원 단위지만, 만약 100조가 넘어가면 단위 확인 필요. 
+      // 여기서는 표준인 '원' 단위로 간주하되, 너무 작으면(백만 미만) 1000 곱하는 안전장치만 고려)
+      return val; 
+    };
+
+    // 👉 여기가 중요: "자본금"이 걸리지 않게 "자본총계", "지배기업소유주지분"만 명시
+    const equity = findAmount(bs, ["ifrs-full_EquityAttributableToOwnersOfParent", "ifrs-full_Equity"], ["자본총계", "지배기업소유주지분"]);
+    const assets = findAmount(bs, ["ifrs-full_Assets"], ["자산총계"]);
+    
+    // 손익계산서
+    const netIncome = findAmount(is, ["ifrs-full_ProfitLossAttributableToOwnersOfParent", "ifrs-full_ProfitLoss"], ["당기순이익(지배)", "당기순이익"]);
+    const revenue = findAmount(is, ["ifrs-full_Revenue"], ["매출액"]);
+    const op = findAmount(is, ["dart_OperatingIncomeLoss"], ["영업이익"]);
+    
+    // 현금흐름
+    const ocf = findAmount(cf, ["ifrs-full_CashFlowsFromUsedInOperatingActivities"], ["영업활동현금흐름"]);
+    const capex = findAmount(cf, ["ifrs-full_PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities"], ["유형자산의취득"]);
+
+    // ✅ 계산 로직 (시장 시총과 DART 데이터 단위가 맞아야 함)
+    // marketCap: 원 단위 / equity: 원 단위
+    
+    if (netIncome > 0 && marketCap > 0) result.per = (marketCap / netIncome).toFixed(2);
+    if (equity > 0 && marketCap > 0) result.pbr = (marketCap / equity).toFixed(2);
+    if (equity > 0) result.roe = ((netIncome / equity) * 100).toFixed(2) + "%";
+    if (assets > 0) result.roa = ((netIncome / assets) * 100).toFixed(2) + "%";
+    if (revenue > 0) result.opm = ((op / revenue) * 100).toFixed(2) + "%";
+    
+    // FCF Yield
+    const fcf = ocf - Math.abs(capex);
+    if (marketCap > 0) result.fcf_yield = ((fcf / marketCap) * 100).toFixed(2) + "%";
+
+    // 점수 산정
+    let score = 5;
+    const perVal = parseFloat(result.per);
+    const pbrVal = parseFloat(result.pbr);
+    
+    if (perVal > 0 && perVal < 15) score += 2;
+    if (pbrVal > 0 && pbrVal < 3) score += 2;
+    
+    result.score = score;
+
+  } catch (e) {
+    console.error("Valuation Error:", e);
+  }
+
+  return result;
 }
