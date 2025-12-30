@@ -3,8 +3,9 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { getCorpCodeByTicker } from "@/app/lib/corpMap";
-import { buildReport } from "../../lib/reportBuilder";
+import { getCorpCodeByTicker } from "@app/lib/corpMap";
+import { buildReport } from "@lib/reportBuilder";
+
 
 
 
