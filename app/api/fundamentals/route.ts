@@ -3,8 +3,21 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { getCorpCodeByTicker } from "@/app/lib/corpMap";
+import { getCorpCodeByTicker } from "@lib/corpMap";
+import { buildReport } from "@lib/reportBuilder";
 
+const DART_API = "https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json";
+
+// ✅ Auto-Filing Detector
+function getLatestReportCode(): string {
+  const m = new Date().getMonth() + 1;
+  if (m >= 11) return "11014"; // 3분기
+  if (m >= 8) return "11012";  // 반기
+  if (m >= 5) return "11013";  // 1분기
+  return "11011";              // 사업
+}
+
+// 에러 응답 헬퍼 함수
 function jsonError(status: number, message: string, extra?: Record<string, unknown>) {
   return NextResponse.json(
     { status: "error", message, ...(extra ?? {}) },
@@ -15,61 +28,100 @@ function jsonError(status: number, message: string, extra?: Record<string, unkno
 export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
-
     const ticker = String(url.searchParams.get("ticker") ?? "").trim();
-    const bsns_year = String(url.searchParams.get("bsns_year") ?? "2024").trim();
-    const reprt_code = String(url.searchParams.get("reprt_code") ?? "11011").trim();
-    const fs_div = String(url.searchParams.get("fs_div") ?? "CFS").trim();
 
     if (!ticker) return jsonError(400, "ticker is required");
 
     const apiKey = String(process.env.DART_API_KEY ?? "").trim();
     if (!apiKey) return jsonError(500, "DART_API_KEY is missing");
 
+    // ① 종목코드 → 고유번호 변환
     let corp_code: string | null = null;
     try {
       corp_code = await getCorpCodeByTicker(ticker);
     } catch (e: any) {
-      return jsonError(500, "corp_code resolver crashed (corpMap.ts)", {
-        ticker,
+      return jsonError(500, "corp_code resolver crashed", {
         detail: String(e?.message ?? e),
       });
     }
+    if (!corp_code)
+      return jsonError(400, `corp_code not found for ticker: ${ticker}`);
 
-    if (!corp_code) {
-      return jsonError(400, "corp_code not found for ticker", {
-        ticker,
-      });
-    }
+    // ② 자동 보고서 코드 탐색 및 과거 3개년 설정
+    const thisYear = new Date().getFullYear();
+    const latest = getLatestReportCode();
+    const targets = [
+      { y: thisYear, r: latest },
+      { y: thisYear - 1, r: latest }, // 전년 동분기
+      { y: thisYear - 2, r: "11011" },
+      { y: thisYear - 3, r: "11011" },
+    ];
 
-    const dartUrl = new URL("https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json");
-    dartUrl.searchParams.set("crtfc_key", apiKey);
-    dartUrl.searchParams.set("corp_code", corp_code);
-    dartUrl.searchParams.set("bsns_year", bsns_year);
-    dartUrl.searchParams.set("reprt_code", reprt_code);
-    dartUrl.searchParams.set("fs_div", fs_div);
+    // ③ 병렬 DART 호출
+    const results = await Promise.all(
+      targets.map(async ({ y, r }) => {
+        const dartUrl = new URL(DART_API);
+        dartUrl.searchParams.set("crtfc_key", apiKey);
+        dartUrl.searchParams.set("corp_code", corp_code!);
+        dartUrl.searchParams.set("bsns_year", y.toString());
+        dartUrl.searchParams.set("reprt_code", r);
+        dartUrl.searchParams.set("fs_div", "CFS");
 
-    const dartRes = await fetch(dartUrl.toString(), { cache: "no-store" });
-    const data = await dartRes.json().catch(() => null);
+        const res = await fetch(dartUrl.toString(), { cache: "no-store" });
+        const json = await res.json().catch(() => null);
+        if (json?.status !== "000") return null;
 
-    if (!dartRes.ok) {
-      return jsonError(502, "DART upstream error", {
-        ticker,
-        corp_code,
-        upstream_status: dartRes.status,
-        upstream_statusText: dartRes.statusText,
-        upstream: data,
-      });
-    }
+        const list = (json.list ?? []).map((item: any) => ({
+          account_nm: item.account_nm || item.account_id,
+          amount: item.thstrm_amount || "0",
+          prev_amount: item.frmtrm_amount || "0",
+          type: item.sj_nm,
+          ord: item.ord,
+        }));
+        return { year: y, reprt: r, data: list };
+      })
+    );
 
+    // ④ 병합
+    const valid = results.filter(Boolean);
+    if (valid.length === 0)
+      return jsonError(404, "No valid data from DART for any year");
+
+    const fused = Object.fromEntries(
+      valid.map((x) => [x.year, { reprt: x.reprt, data: x.data }])
+    );
+
+    // ⑤ 분석 기준 정보
+    const latestYear = Math.max(...valid.map((v: any) => v.year));
+    const latestLabel =
+      latest === "11014"
+        ? "3분기"
+        : latest === "11012"
+        ? "반기"
+        : latest === "11013"
+        ? "1분기"
+        : "사업";
+    const historicRange = `${thisYear - 3}~${thisYear - 1}`;
+
+    // ⑥ ✅ Phase 4: 리포트 빌드
+    // 샘플용 값 (추후 실제 시세 데이터로 교체)
+    const priceSeries = []; // 가격 데이터 없으면 빈 배열
+    const marketCap = 0; // 시총 (직접 연결 가능)
+
+    const report = await buildReport(fused, priceSeries, marketCap);
+
+    // ⑦ 최종 응답
     return NextResponse.json(
       {
         status: "ok",
         message: "ok",
         ticker,
         corp_code,
-        source: "dart",
-        data,
+        asof: `${latestYear}년 ${latestLabel} 누적 실적 기준`,
+        historic_range: historicRange,
+        reports: valid.length,
+        data: fused,
+        report, // ✅ 통합 분석 결과 포함
       },
       {
         headers: {
@@ -79,7 +131,8 @@ export async function GET(req: Request) {
       }
     );
   } catch (e: any) {
-    // ✅ 최후의 500 방어
-    return jsonError(500, "internal error", { detail: String(e?.message ?? e) });
+    return jsonError(500, "Internal Server Error", {
+      detail: String(e?.message ?? e),
+    });
   }
 }
