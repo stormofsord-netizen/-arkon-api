@@ -3,12 +3,8 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { getCorpCodeByTicker } from "@app/lib/corpMap";
+import { getCorpCodeByTicker } from "@lib/corpMap";
 import { buildReport } from "@lib/reportBuilder";
-
-
-
-
 
 const DART_API = "https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json";
 
