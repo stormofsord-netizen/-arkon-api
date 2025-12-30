@@ -4,7 +4,8 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { getCorpCodeByTicker } from "@/app/lib/corpMap";
-import { buildReport } from "@/lib/reportBuilder"; // ✅ ← 올바른 위치로 이동
+import { buildReport } from "../../../lib/reportBuilder";
+
 
 const DART_API = "https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json";
 
