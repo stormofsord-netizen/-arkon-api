@@ -2,12 +2,13 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { fetchFundamentalsFusion } from "@lib/dartHandler";
-import { fuseFinancials } from "@lib/financialFusion";
-import { analyzeValuation } from "@lib/financialAnalyzer";
-import { analyzeRisk } from "@lib/riskAnalyzer";
-import { analyzeQuant } from "@lib/quantAnalyzer";
-import { buildReport } from "@lib/reportBuilder";
+// ✅ 경로 수정: @lib -> @/lib (Next.js 표준)
+import { fetchFundamentalsFusion } from "@/lib/dartHandler";
+import { fuseFinancials } from "@/lib/financialFusion";
+import { analyzeValuation } from "@/lib/financialAnalyzer";
+import { analyzeRisk } from "@/lib/riskAnalyzer";
+import { analyzeQuant } from "@/lib/quantAnalyzer";
+import { buildReport } from "@/lib/reportBuilder";
 
 function jsonError(status: number, message: string, extra?: Record<string, unknown>) {
   return NextResponse.json(
@@ -23,7 +24,7 @@ export async function GET(req: Request) {
 
     if (!ticker) return jsonError(400, "ticker is required");
 
-    // 1️⃣ 펀더멘털 수집 (최신 분기 + 3개년)
+    // 1️⃣ 펀더멘털 수집
     const dartDataset = await fetchFundamentalsFusion(ticker);
     if (!dartDataset?.data) return jsonError(404, "No DART data found");
 
@@ -37,19 +38,19 @@ export async function GET(req: Request) {
     // 3️⃣ 병합
     const fused = fuseFinancials(reports);
 
-    // 4️⃣ 밸류에이션 분석 (시총 포함)
+    // 4️⃣ 밸류에이션 분석
     const valuation = analyzeValuation(fused, dartDataset.marketCap);
 
-    // ✅ 5️⃣ 리스크 분석 (recentNews 미구현 → [])
+    // 5️⃣ 리스크 분석
     const risk = await analyzeRisk(fused, []);
 
-    // ✅ 6️⃣ 퀀트 분석 (priceSeries 미구현 → [])
+    // 6️⃣ 퀀트 분석
     const quant = await analyzeQuant([]);
 
     // 7️⃣ 리포트 통합
     const report = await buildReport(fused, [], dartDataset.marketCap);
 
-    // ✅ 7.5️⃣ 타입 안전 처리
+    // 7.5️⃣ 타입 안전 처리
     const fundamentalSection =
       report && typeof report === "object" && "fundamental" in report
         ? report.fundamental
@@ -84,9 +85,9 @@ export async function GET(req: Request) {
       }
     );
   } catch (e: any) {
+    console.error("FullReport Error:", e); // 서버 로그용
     return jsonError(500, "Internal Server Error", {
       detail: String(e?.message ?? e),
     });
   }
 }
-//
