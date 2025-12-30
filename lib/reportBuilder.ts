@@ -8,9 +8,10 @@
  *  - JANUS 시스템 표준 포맷 준수
  */
 
-import { analyzeValuation } from "./financialAnalyzer";
-import { analyzeRisk } from "./riskAnalyzer";
-import { analyzeQuant } from "./quantAnalyzer";
+import { analyzeValuation } from "@lib/financialAnalyzer";
+import { analyzeRisk } from "@lib/riskAnalyzer";
+import { analyzeQuant } from "@lib/quantAnalyzer";
+
 
 export async function buildReport(dataset: any, priceSeries: any[], marketCap: number) {
   // 1️⃣ 각 Phase 실행
