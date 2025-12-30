@@ -20,36 +20,35 @@ export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
     const ticker = String(url.searchParams.get("ticker") ?? "").trim();
-
     if (!ticker) return jsonError(400, "ticker is required");
 
-    // 1️⃣ DART 데이터 수집 (최신 분기 + 과거 3개년)
+    // 1️⃣ 펀더멘털 수집 (최신 분기 + 3개년)
     const dartDataset = await fetchFundamentalsFusion(ticker);
     if (!dartDataset?.data) return jsonError(404, "No DART data found");
 
-    // ✅ 2️⃣ 데이터 변환 → YearlyData[] 구조로 맞춤
+    // 2️⃣ 데이터 구조 통일
     const reports = Object.entries(dartDataset.data).map(([year, v]: any) => ({
       year: Number(year),
       reprt: v.reprt ?? "11011",
       data: v.data ?? [],
     }));
 
-    // ✅ 3️⃣ 데이터 병합
+    // 3️⃣ 병합
     const fused = fuseFinancials(reports);
 
-    // 4️⃣ 밸류에이션 분석
+    // 4️⃣ 밸류에이션 분석 (시총 포함)
     const valuation = analyzeValuation(fused, dartDataset.marketCap);
 
     // 5️⃣ 리스크 분석
     const risk = await analyzeRisk(fused, dartDataset.recentNews ?? []);
 
-    // 6️⃣ Quant 분석
+    // 6️⃣ 퀀트 분석
     const quant = await analyzeQuant(dartDataset.priceSeries ?? []);
 
-    // 7️⃣ 통합 리포트
+    // 7️⃣ 리포트 통합
     const report = await buildReport(fused, dartDataset.priceSeries, dartDataset.marketCap);
 
-    // 8️⃣ 요약 섹션
+    // 8️⃣ 요약
     const summary = {
       valuation_score: valuation.score,
       risk_level: risk.alert,
@@ -63,6 +62,8 @@ export async function GET(req: Request) {
         system: "ARKON-JANUS v3.6.3",
         asof: valuation.asof,
         generated_at: new Date().toISOString(),
+        corp_code: dartDataset.corp_code,
+        marketCap: dartDataset.marketCap,
         fundamental: report.fundamental,
         risk,
         quant,
