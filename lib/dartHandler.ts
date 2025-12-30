@@ -1,100 +1,65 @@
-/**
- * 🧩 DART API Handler for ARKON-JANUS v3.6.3 (2025 기준)
- * 기능:
- *  - ticker로 최신 분기 + 과거 3개년 재무데이터 병합
- *  - CFS(연결) 기준 / 자동 보고서 코드 감지
- *  - marketCap(시가총액) 기본값 포함
- */
-
-import { fuseFinancials } from "./financialFusion";
+// app/lib/dartHandler.ts
 import { getCorpCodeByTicker } from "./corpMap";
+import { fetchMarketData } from "./priceFetcher"; // ✅ 추가됨
 
-const DART_API = "https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json";
+export interface DartDataset {
+  corp_code: string;
+  ticker: string;
+  marketCap: number; // ✅ 실시간 시총
+  price: number;     // ✅ 실시간 주가
+  data: any;         // DART 재무 데이터
+  history: any[];    // ✅ 차트 데이터
+}
 
-/**
- * ✅ 펀더멘털 병합 핸들러
- * @param ticker 종목코드 (예: "278470")
- */
-export async function fetchFundamentalsFusion(ticker: string) {
-  const apiKey = String(process.env.DART_API_KEY ?? "").trim();
-  if (!apiKey) throw new Error("DART_API_KEY missing");
-
+export async function fetchFundamentalsFusion(ticker: string): Promise<DartDataset | null> {
+  // 1. Corp Code 찾기
   const corp_code = await getCorpCodeByTicker(ticker);
-  if (!corp_code) throw new Error(`corp_code not found for ticker ${ticker}`);
+  if (!corp_code) return null;
 
-  /**
-   * ✅ 보고서 코드 자동 감지
-   * - 1Q (11013)
-   * - 반기 (11012)
-   * - 3Q (11014)
-   * - 사업 (11011)
-   */
-  function getLatestReportCode(): string {
-    const m = new Date().getMonth() + 1;
-    if (m >= 11) return "11014"; // 3분기
-    if (m >= 8) return "11012";  // 반기
-    if (m >= 5) return "11013";  // 1분기
-    return "11011";              // 사업
+  const apiKey = process.env.DART_API_KEY;
+  if (!apiKey) throw new Error("DART_API_KEY is missing");
+
+  // 2. DART 데이터 가져오기 (병렬 처리로 속도 향상)
+  // (여기서는 3Q와 사업보고서를 동시에 찔러봅니다)
+  const url3Q = `https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json?crtfc_key=${apiKey}&corp_code=${corp_code}&bsns_year=2024&reprt_code=11013&fs_div=CFS`;
+  const urlAnnual = `https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json?crtfc_key=${apiKey}&corp_code=${corp_code}&bsns_year=2023&reprt_code=11011&fs_div=CFS`;
+
+  // 3. 시장 데이터(가격) 가져오기 ✅
+  const marketPromise = fetchMarketData(ticker);
+  const dartPromise3Q = fetch(url3Q, { cache: 'no-store' }).then(r => r.json());
+  const dartPromiseAnnual = fetch(urlAnnual, { cache: 'no-store' }).then(r => r.json());
+
+  const [marketData, data3Q, dataAnnual] = await Promise.all([marketPromise, dartPromise3Q, dartPromiseAnnual]);
+
+  // 4. 데이터 우선순위 결정 (3Q 성공하면 3Q, 아니면 Annual)
+  let finalDartData = null;
+  let reportYear = 2023;
+  
+  if (data3Q && data3Q.status === "000") {
+    finalDartData = data3Q;
+    reportYear = 2024;
+  } else if (dataAnnual && dataAnnual.status === "000") {
+    finalDartData = dataAnnual;
+    reportYear = 2023;
   }
 
-  const thisYear = new Date().getFullYear();
-  const latest = getLatestReportCode();
+  // 5. 최종 데이터셋 구성
+  // 시장 데이터가 없으면(에러나면) 안전하게 0 처리 (LOCK 걸리도록)
+  const safePrice = marketData?.price || 0;
+  const safeMarketCap = marketData?.marketCap || 0;
+  const safeHistory = marketData?.history || [];
 
-  // ✅ 최근 분기 + 과거 3개년 호출 대상 구성
-  const targets = [
-    { y: thisYear, r: latest },
-    { y: thisYear - 1, r: latest },
-    { y: thisYear - 2, r: "11011" },
-    { y: thisYear - 3, r: "11011" },
-  ];
-
-  // ✅ 병렬 DART 호출
-  const results = await Promise.all(
-    targets.map(async ({ y, r }) => {
-      const dartUrl = new URL(DART_API);
-      dartUrl.searchParams.set("crtfc_key", apiKey);
-      dartUrl.searchParams.set("corp_code", corp_code);
-      dartUrl.searchParams.set("bsns_year", y.toString());
-      dartUrl.searchParams.set("reprt_code", r);
-      dartUrl.searchParams.set("fs_div", "CFS");
-
-      const res = await fetch(dartUrl.toString(), { cache: "no-store" });
-      const json = await res.json().catch(() => null);
-      if (json?.status !== "000") return null;
-
-      // ✅ 리스트 정제
-      const list = (json.list ?? []).map((item: any) => ({
-        account_nm: item.account_nm || item.account_id,
-        amount: Number(item.thstrm_amount?.replace(/,/g, "") || 0),
-        prev_amount: Number(item.frmtrm_amount?.replace(/,/g, "") || 0),
-        type: item.sj_nm,
-        ord: item.ord,
-      }));
-
-      return { year: y, reprt: r, data: list };
-    })
-  );
-
-  const valid = results.filter(Boolean);
-  if (!valid.length) throw new Error("No valid DART data found");
-
-  // ✅ 임시 시가총액 계산 (차후 KRX 연동 예정)
-  // 기본값: 0 (빌드 안정성 확보)
-  const latestPrice = 100000; // TODO: Replace with real-time fetch from KRX
-  const shares = 20000000;    // TODO: Replace with real float shares
-  const marketCap = latestPrice && shares ? latestPrice * shares : 0;
-
-  // ✅ 로그 (디버깅용)
-  console.log(`[DART] ✅ ${ticker} (${corp_code}) fetched ${valid.length} reports. MarketCap=${marketCap}`);
-
-  // ✅ 최종 반환 구조
   return {
-    status: "ok",
-    asof: `${thisYear}년 ${latest === "11014" ? "3분기" : "사업"} 기준`,
-    historic_range: `${thisYear - 3}~${thisYear - 1}`,
-    reports: valid.length,
     corp_code,
-    marketCap, // 포함됨
-    data: Object.fromEntries(valid.map((v: any) => [v.year, v])),
+    ticker,
+    marketCap: safeMarketCap,
+    price: safePrice,
+    history: safeHistory,
+    data: {
+      [reportYear]: {
+        reprt: reportYear === 2024 ? "11013" : "11011",
+        data: finalDartData?.list || []
+      }
+    }
   };
 }
