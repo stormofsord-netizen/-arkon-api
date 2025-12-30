@@ -20,6 +20,7 @@ export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
     const ticker = String(url.searchParams.get("ticker") ?? "").trim();
+
     if (!ticker) return jsonError(400, "ticker is required");
 
     // 1️⃣ 펀더멘털 수집 (최신 분기 + 3개년)
@@ -39,14 +40,14 @@ export async function GET(req: Request) {
     // 4️⃣ 밸류에이션 분석 (시총 포함)
     const valuation = analyzeValuation(fused, dartDataset.marketCap);
 
-    // 5️⃣ 리스크 분석
-    const risk = await analyzeRisk(fused, dartDataset.recentNews ?? []);
+    // ✅ 5️⃣ 리스크 분석 (recentNews 아직 미구현 → 빈 배열로 대체)
+    const risk = await analyzeRisk(fused, []);
 
-    // 6️⃣ 퀀트 분석
-    const quant = await analyzeQuant(dartDataset.priceSeries ?? []);
+    // ✅ 6️⃣ 퀀트 분석 (priceSeries 아직 미구현 → 빈 배열로 대체)
+    const quant = await analyzeQuant([]);
 
     // 7️⃣ 리포트 통합
-    const report = await buildReport(fused, dartDataset.priceSeries, dartDataset.marketCap);
+    const report = await buildReport(fused, [], dartDataset.marketCap);
 
     // 8️⃣ 요약
     const summary = {
