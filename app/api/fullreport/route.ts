@@ -1,19 +1,7 @@
-/**
- * 📘 /app/api/fullreport/route.ts
- * ARKON-JANUS v3.6.3 (2025 기준)
- *
- * 기능:
- * 1️⃣ ticker 기준으로 전체 분석 파이프라인 실행
- * 2️⃣ dartHandler → financialFusion → financialAnalyzer → riskAnalyzer → quantAnalyzer → reportBuilder 자동 연동
- * 3️⃣ 완전 자동 “Full Report” 모드
- */
-
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-
-// Core modules
 import { fetchFundamentalsFusion } from "@lib/dartHandler";
 import { fuseFinancials } from "@lib/financialFusion";
 import { analyzeValuation } from "@lib/financialAnalyzer";
@@ -21,9 +9,6 @@ import { analyzeRisk } from "@lib/riskAnalyzer";
 import { analyzeQuant } from "@lib/quantAnalyzer";
 import { buildReport } from "@lib/reportBuilder";
 
-/**
- * ✅ 헬퍼 함수: 에러 응답
- */
 function jsonError(status: number, message: string, extra?: Record<string, unknown>) {
   return NextResponse.json(
     { status: "error", message, ...(extra ?? {}) },
@@ -31,10 +16,6 @@ function jsonError(status: number, message: string, extra?: Record<string, unkno
   );
 }
 
-/**
- * ✅ FULL REPORT 엔드포인트
- * 예시: /api/fullreport?ticker=278470
- */
 export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
@@ -46,29 +27,36 @@ export async function GET(req: Request) {
     const dartDataset = await fetchFundamentalsFusion(ticker);
     if (!dartDataset?.data) return jsonError(404, "No DART data found");
 
-    // 2️⃣ 데이터 병합
-    const fused = fuseFinancials(Object.values(dartDataset.data));
+    // ✅ 2️⃣ 데이터 변환 → YearlyData[] 구조로 맞춤
+    const reports = Object.entries(dartDataset.data).map(([year, v]: any) => ({
+      year: Number(year),
+      reprt: v.reprt ?? "11011",
+      data: v.data ?? [],
+    }));
 
-    // 3️⃣ 밸류에이션 분석
+    // ✅ 3️⃣ 데이터 병합
+    const fused = fuseFinancials(reports);
+
+    // 4️⃣ 밸류에이션 분석
     const valuation = analyzeValuation(fused, dartDataset.marketCap);
 
-    // 4️⃣ 리스크 분석
+    // 5️⃣ 리스크 분석
     const risk = await analyzeRisk(fused, dartDataset.recentNews ?? []);
 
-    // 5️⃣ Quant 분석 (가격 시계열 optional)
+    // 6️⃣ Quant 분석
     const quant = await analyzeQuant(dartDataset.priceSeries ?? []);
 
-    // 6️⃣ 리포트 통합
+    // 7️⃣ 통합 리포트
     const report = await buildReport(fused, dartDataset.priceSeries, dartDataset.marketCap);
 
-    // 7️⃣ 전체 요약 섹션 추가
+    // 8️⃣ 요약 섹션
     const summary = {
       valuation_score: valuation.score,
       risk_level: risk.alert,
       signal: quant.price_signal,
     };
 
-    // 8️⃣ 최종 리턴
+    // ✅ 최종 응답
     return NextResponse.json(
       {
         status: "ok",
