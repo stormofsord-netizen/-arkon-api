@@ -40,14 +40,20 @@ export async function GET(req: Request) {
     // 4️⃣ 밸류에이션 분석 (시총 포함)
     const valuation = analyzeValuation(fused, dartDataset.marketCap);
 
-    // ✅ 5️⃣ 리스크 분석 (recentNews 아직 미구현 → 빈 배열로 대체)
+    // ✅ 5️⃣ 리스크 분석 (recentNews 미구현 → [])
     const risk = await analyzeRisk(fused, []);
 
-    // ✅ 6️⃣ 퀀트 분석 (priceSeries 아직 미구현 → 빈 배열로 대체)
+    // ✅ 6️⃣ 퀀트 분석 (priceSeries 미구현 → [])
     const quant = await analyzeQuant([]);
 
     // 7️⃣ 리포트 통합
     const report = await buildReport(fused, [], dartDataset.marketCap);
+
+    // ✅ 7.5️⃣ 타입 안전 처리
+    const fundamentalSection =
+      report && typeof report === "object" && "fundamental" in report
+        ? report.fundamental
+        : { message: "Report generation failed" };
 
     // 8️⃣ 요약
     const summary = {
@@ -65,7 +71,7 @@ export async function GET(req: Request) {
         generated_at: new Date().toISOString(),
         corp_code: dartDataset.corp_code,
         marketCap: dartDataset.marketCap,
-        fundamental: report.fundamental,
+        fundamental: fundamentalSection,
         risk,
         quant,
         summary,
@@ -77,7 +83,6 @@ export async function GET(req: Request) {
         },
       }
     );
-
   } catch (e: any) {
     return jsonError(500, "Internal Server Error", {
       detail: String(e?.message ?? e),
