@@ -2,7 +2,9 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-// ✅ 경로 수정: @lib -> @/lib (Next.js 표준)
+
+// ✅ 파일이 실제로 존재하는 경로로 수정 (스크린샷 기반)
+// 만약 lib폴더가 app폴더 밖(최상위)에 있다면 아래가 맞습니다.
 import { fetchFundamentalsFusion } from "@/lib/dartHandler";
 import { fuseFinancials } from "@/lib/financialFusion";
 import { analyzeValuation } from "@/lib/financialAnalyzer";
@@ -24,9 +26,13 @@ export async function GET(req: Request) {
 
     if (!ticker) return jsonError(400, "ticker is required");
 
+    console.log(`[API] Starting Full Report for ${ticker}`);
+
     // 1️⃣ 펀더멘털 수집
     const dartDataset = await fetchFundamentalsFusion(ticker);
-    if (!dartDataset?.data) return jsonError(404, "No DART data found");
+    if (!dartDataset || !dartDataset.data) {
+        return jsonError(404, "No DART data found (fetch failed)");
+    }
 
     // 2️⃣ 데이터 구조 통일
     const reports = Object.entries(dartDataset.data).map(([year, v]: any) => ({
@@ -50,29 +56,22 @@ export async function GET(req: Request) {
     // 7️⃣ 리포트 통합
     const report = await buildReport(fused, [], dartDataset.marketCap);
 
-    // 7.5️⃣ 타입 안전 처리
-    const fundamentalSection =
-      report && typeof report === "object" && "fundamental" in report
-        ? report.fundamental
-        : { message: "Report generation failed" };
-
     // 8️⃣ 요약
     const summary = {
-      valuation_score: valuation.score,
-      risk_level: risk.alert,
-      signal: quant.price_signal,
+      valuation_score: valuation?.score ?? 0,
+      risk_level: risk?.alert ?? "Unknown",
+      signal: quant?.price_signal ?? "N/A",
     };
 
-    // ✅ 최종 응답
     return NextResponse.json(
       {
         status: "ok",
         system: "ARKON-JANUS v3.6.3",
-        asof: valuation.asof,
+        asof: valuation?.asof,
         generated_at: new Date().toISOString(),
         corp_code: dartDataset.corp_code,
         marketCap: dartDataset.marketCap,
-        fundamental: fundamentalSection,
+        fundamental: report?.fundamental,
         risk,
         quant,
         summary,
@@ -85,7 +84,7 @@ export async function GET(req: Request) {
       }
     );
   } catch (e: any) {
-    console.error("FullReport Error:", e); // 서버 로그용
+    console.error("FullReport Error:", e);
     return jsonError(500, "Internal Server Error", {
       detail: String(e?.message ?? e),
     });
