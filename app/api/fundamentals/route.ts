@@ -4,6 +4,18 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { getCorpCodeByTicker } from "@/app/lib/corpMap";
+import { buildReport } from "@/lib/reportBuilder"; // ✅ ← 올바른 위치로 이동
+
+const DART_API = "https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json";
+
+// ✅ Auto-Filing Detector
+function getLatestReportCode(): string {
+  const m = new Date().getMonth() + 1;
+  if (m >= 11) return "11014"; // 3분기
+  if (m >= 8) return "11012";  // 반기
+  if (m >= 5) return "11013";  // 1분기
+  return "11011";              // 사업
+}
 
 // 에러 응답 헬퍼 함수
 function jsonError(status: number, message: string, extra?: Record<string, unknown>) {
@@ -16,19 +28,14 @@ function jsonError(status: number, message: string, extra?: Record<string, unkno
 export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
-
-    // 1. 파라미터 파싱
     const ticker = String(url.searchParams.get("ticker") ?? "").trim();
-    const bsns_year = String(url.searchParams.get("bsns_year") ?? "2024").trim();
-    const reprt_code = String(url.searchParams.get("reprt_code") ?? "11011").trim();
-    const fs_div = String(url.searchParams.get("fs_div") ?? "CFS").trim();
 
     if (!ticker) return jsonError(400, "ticker is required");
 
     const apiKey = String(process.env.DART_API_KEY ?? "").trim();
     if (!apiKey) return jsonError(500, "DART_API_KEY is missing");
 
-    // 2. 종목코드(Ticker) -> 고유번호(CorpCode) 변환
+    // ① 종목코드 → 고유번호 변환
     let corp_code: string | null = null;
     try {
       corp_code = await getCorpCodeByTicker(ticker);
@@ -37,65 +44,84 @@ export async function GET(req: Request) {
         detail: String(e?.message ?? e),
       });
     }
+    if (!corp_code)
+      return jsonError(400, `corp_code not found for ticker: ${ticker}`);
 
-    if (!corp_code) {
-      return jsonError(400, `corp_code not found for ticker: ${ticker} (corpMap 확인 필요)`);
-    }
+    // ② 자동 보고서 코드 탐색 및 과거 3개년 설정
+    const thisYear = new Date().getFullYear();
+    const latest = getLatestReportCode();
+    const targets = [
+      { y: thisYear, r: latest },
+      { y: thisYear - 1, r: latest }, // 전년 동분기
+      { y: thisYear - 2, r: "11011" },
+      { y: thisYear - 3, r: "11011" },
+    ];
 
-    // 3. DART API 호출
-    const dartUrl = new URL("https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json");
-    dartUrl.searchParams.set("crtfc_key", apiKey);
-    dartUrl.searchParams.set("corp_code", corp_code);
-    dartUrl.searchParams.set("bsns_year", bsns_year);
-    dartUrl.searchParams.set("reprt_code", reprt_code);
-    dartUrl.searchParams.set("fs_div", fs_div);
+    // ③ 병렬 DART 호출
+    const results = await Promise.all(
+      targets.map(async ({ y, r }) => {
+        const dartUrl = new URL(DART_API);
+        dartUrl.searchParams.set("crtfc_key", apiKey);
+        dartUrl.searchParams.set("corp_code", corp_code!);
+        dartUrl.searchParams.set("bsns_year", y.toString());
+        dartUrl.searchParams.set("reprt_code", r);
+        dartUrl.searchParams.set("fs_div", "CFS");
 
-    const dartRes = await fetch(dartUrl.toString(), { cache: "no-store" });
-    const rawData = await dartRes.json().catch(() => null);
+        const res = await fetch(dartUrl.toString(), { cache: "no-store" });
+        const json = await res.json().catch(() => null);
+        if (json?.status !== "000") return null;
 
-    // 4. DART 응답 에러 처리
-    if (!dartRes.ok || !rawData) {
-      return jsonError(502, "DART upstream error", {
-        upstream_status: dartRes.status,
-        upstream_data: rawData,
-      });
-    }
+        const list = (json.list ?? []).map((item: any) => ({
+          account_nm: item.account_nm || item.account_id,
+          amount: item.thstrm_amount || "0",
+          prev_amount: item.frmtrm_amount || "0",
+          type: item.sj_nm,
+          ord: item.ord,
+        }));
+        return { year: y, reprt: r, data: list };
+      })
+    );
 
-    if (rawData.status !== "000" && rawData.message) {
-      // DART API 자체 에러 (인증키 만료, 데이터 없음 등)
-      return jsonError(404, rawData.message, { dart_code: rawData.status });
-    }
+    // ④ 병합
+    const valid = results.filter(Boolean);
+    if (valid.length === 0)
+      return jsonError(404, "No valid data from DART for any year");
 
-    // 5. [핵심] 데이터 다이어트 (GPT 용량 초과 방지)
-    // 필요한 필드만 남기고 나머지는 버립니다.
-    let slimData = [];
-    if (rawData.list && Array.isArray(rawData.list)) {
-      slimData = rawData.list.map((item: any) => ({
-        // 계정명 (예: 매출액, 영업이익)
-        account_nm: item.account_nm || item.account_id,
-        // 당기 금액 (쉼표 제거 후 숫자로 변환하거나 문자열 유지)
-        amount: item.thstrm_amount || "0",
-        // 전기 금액 (비교용)
-        prev_amount: item.frmtrm_amount || "0",
-        // 구분 (재무상태표/손익계산서)
-        type: item.sj_nm,
-        // 정렬 순서
-        ord: item.ord
-      }));
-    } else {
-      return jsonError(404, "No data list found in DART response");
-    }
+    const fused = Object.fromEntries(
+      valid.map((x) => [x.year, { reprt: x.reprt, data: x.data }])
+    );
 
-    // 6. 최종 응답 반환
+    // ⑤ 분석 기준 정보
+    const latestYear = Math.max(...valid.map((v: any) => v.year));
+    const latestLabel =
+      latest === "11014"
+        ? "3분기"
+        : latest === "11012"
+        ? "반기"
+        : latest === "11013"
+        ? "1분기"
+        : "사업";
+    const historicRange = `${thisYear - 3}~${thisYear - 1}`;
+
+    // ⑥ ✅ Phase 4: 리포트 빌드
+    // 샘플용 값 (추후 실제 시세 데이터로 교체)
+    const priceSeries = []; // 가격 데이터 없으면 빈 배열
+    const marketCap = 0; // 시총 (직접 연결 가능)
+
+    const report = await buildReport(fused, priceSeries, marketCap);
+
+    // ⑦ 최종 응답
     return NextResponse.json(
       {
         status: "ok",
         message: "ok",
         ticker,
         corp_code,
-        year: bsns_year,
-        report: reprt_code,
-        data: slimData, // 압축된 데이터
+        asof: `${latestYear}년 ${latestLabel} 누적 실적 기준`,
+        historic_range: historicRange,
+        reports: valid.length,
+        data: fused,
+        report, // ✅ 통합 분석 결과 포함
       },
       {
         headers: {
@@ -104,8 +130,9 @@ export async function GET(req: Request) {
         },
       }
     );
-
   } catch (e: any) {
-    return jsonError(500, "Internal Server Error", { detail: String(e?.message ?? e) });
+    return jsonError(500, "Internal Server Error", {
+      detail: String(e?.message ?? e),
+    });
   }
 }
