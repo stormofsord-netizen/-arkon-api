@@ -1,11 +1,19 @@
-import fetch from "node-fetch";
+/**
+ * 🧩 DART API Handler for ARKON-JANUS v3.6.3 (2025 기준)
+ * 기능:
+ *  - ticker로 최신 분기 + 과거 3개년 재무데이터 병합
+ *  - CFS(연결) 기준 / 자동 보고서 코드 감지
+ *  - marketCap(시가총액) 기본값 포함
+ */
+
 import { fuseFinancials } from "./financialFusion";
 import { getCorpCodeByTicker } from "./corpMap";
 
 const DART_API = "https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json";
 
 /**
- * 🧩 최신 분기 + 과거 3개년 DART 데이터 병합
+ * ✅ 펀더멘털 병합 핸들러
+ * @param ticker 종목코드 (예: "278470")
  */
 export async function fetchFundamentalsFusion(ticker: string) {
   const apiKey = String(process.env.DART_API_KEY ?? "").trim();
@@ -14,7 +22,13 @@ export async function fetchFundamentalsFusion(ticker: string) {
   const corp_code = await getCorpCodeByTicker(ticker);
   if (!corp_code) throw new Error(`corp_code not found for ticker ${ticker}`);
 
-  // ✅ 보고서 코드 자동 감지
+  /**
+   * ✅ 보고서 코드 자동 감지
+   * - 1Q (11013)
+   * - 반기 (11012)
+   * - 3Q (11014)
+   * - 사업 (11011)
+   */
   function getLatestReportCode(): string {
     const m = new Date().getMonth() + 1;
     if (m >= 11) return "11014"; // 3분기
@@ -26,6 +40,7 @@ export async function fetchFundamentalsFusion(ticker: string) {
   const thisYear = new Date().getFullYear();
   const latest = getLatestReportCode();
 
+  // ✅ 최근 분기 + 과거 3개년 호출 대상 구성
   const targets = [
     { y: thisYear, r: latest },
     { y: thisYear - 1, r: latest },
@@ -33,6 +48,7 @@ export async function fetchFundamentalsFusion(ticker: string) {
     { y: thisYear - 3, r: "11011" },
   ];
 
+  // ✅ 병렬 DART 호출
   const results = await Promise.all(
     targets.map(async ({ y, r }) => {
       const dartUrl = new URL(DART_API);
@@ -46,6 +62,7 @@ export async function fetchFundamentalsFusion(ticker: string) {
       const json = await res.json().catch(() => null);
       if (json?.status !== "000") return null;
 
+      // ✅ 리스트 정제
       const list = (json.list ?? []).map((item: any) => ({
         account_nm: item.account_nm || item.account_id,
         amount: Number(item.thstrm_amount?.replace(/,/g, "") || 0),
@@ -61,18 +78,23 @@ export async function fetchFundamentalsFusion(ticker: string) {
   const valid = results.filter(Boolean);
   if (!valid.length) throw new Error("No valid DART data found");
 
-  // ✅ 임시 시가총액 계산 (실제는 KRX API나 프론트에서 보강)
-  const latestPrice = 100000; // (임시값 또는 fetch로 대체)
-  const shares = 20000000;    // (임시값)
-  const marketCap = latestPrice * shares;
+  // ✅ 임시 시가총액 계산 (차후 KRX 연동 예정)
+  // 기본값: 0 (빌드 안정성 확보)
+  const latestPrice = 100000; // TODO: Replace with real-time fetch from KRX
+  const shares = 20000000;    // TODO: Replace with real float shares
+  const marketCap = latestPrice && shares ? latestPrice * shares : 0;
 
+  // ✅ 로그 (디버깅용)
+  console.log(`[DART] ✅ ${ticker} (${corp_code}) fetched ${valid.length} reports. MarketCap=${marketCap}`);
+
+  // ✅ 최종 반환 구조
   return {
     status: "ok",
     asof: `${thisYear}년 ${latest === "11014" ? "3분기" : "사업"} 기준`,
     historic_range: `${thisYear - 3}~${thisYear - 1}`,
     reports: valid.length,
     corp_code,
-    marketCap, // ✅ 추가됨
-    data: Object.fromEntries(valid.map((v) => [v.year, v])),
+    marketCap, // 포함됨
+    data: Object.fromEntries(valid.map((v: any) => [v.year, v])),
   };
 }
