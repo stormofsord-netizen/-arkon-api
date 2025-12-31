@@ -1,75 +1,48 @@
-// app/lib/financialAnalyzer.ts
+// lib/financialAnalyzer.ts
 
 export function analyzeValuation(fused: any, marketCap: number) {
   try {
-    // ✅ 다양한 구조 지원 (배열/직접형/data/list/연도형 + dart.raw)
-    let dataList: any[] = [];
-
-    // 1) fused 자체가 배열인 경우
-    if (Array.isArray(fused)) {
-      dataList = fused;
-    }
-
-    // 2) fused.data / fused.list
-    else if (fused?.data && Array.isArray(fused.data)) {
-      dataList = fused.data;
-    } else if (fused?.list && Array.isArray(fused.list)) {
-      dataList = fused.list;
-    }
-
-    // 3) fused.raw (혹시 raw를 바로 넘긴 경우)
-    else if (fused?.raw && Array.isArray(fused.raw)) {
-      dataList = fused.raw;
-    }
-
-    // 4) 연도 키 감지: {2024:{data:[...]}} 또는 {2024:{raw:[...]}}
-    else if (fused && typeof fused === "object") {
-      const yearKey =
-        Object.keys(fused).find((k) => Array.isArray(fused?.[k]?.data)) ||
-        Object.keys(fused).find((k) => Array.isArray(fused?.[k]?.raw));
-
-      if (yearKey) {
-        if (Array.isArray(fused?.[yearKey]?.data)) dataList = fused[yearKey].data;
-        else if (Array.isArray(fused?.[yearKey]?.raw)) dataList = fused[yearKey].raw;
-      }
-    }
-
-    // 5) ✅ "전체 리포트 객체" 형태: { dart: { 2024: { raw:[...] } } }
-    if ((!Array.isArray(dataList) || dataList.length === 0) && fused?.dart) {
-      const dartObj = fused.dart;
-
-      const yearKey =
-        Object.keys(dartObj).find((k) => Array.isArray(dartObj?.[k]?.raw)) ||
-        Object.keys(dartObj).find((k) => Array.isArray(dartObj?.[k]?.data));
-
-      if (yearKey) {
-        if (Array.isArray(dartObj?.[yearKey]?.raw)) dataList = dartObj[yearKey].raw;
-        else if (Array.isArray(dartObj?.[yearKey]?.data)) dataList = dartObj[yearKey].data;
-      }
-    }
+    // ✅ 어떤 구조든 내부에서 "재무 row 배열"을 찾아서 사용
+    const dataList = extractFinancialRows(fused);
 
     if (!Array.isArray(dataList) || dataList.length === 0) {
       console.warn("[Valuation] ❌ No DART financial list found.");
+      // 디버그용: fused 최상위 키라도 찍어두기
+      try {
+        console.warn("[Valuation] fused keys:", fused ? Object.keys(fused) : "null");
+      } catch {}
       return emptyResult("데이터 없음");
     }
 
-    // ✅ 이름 매칭 함수 (공백 제거 + 부분일치)
+    // ✅ 이름 매칭 함수 (account_nm 기반)
     const findVal = (keywords: string[]) => {
-      const item = dataList.find((x) => {
-        const name = String(x?.account_nm ?? "").replace(/\s/g, "");
+      const item = dataList.find((x: any) => {
+        const name = String(x?.account_nm ?? x?.account_name ?? "").replace(/\s/g, "");
         return keywords.some((kw) => name.includes(kw));
       });
-      return item ? parseFloat(String(item.thstrm_amount ?? "0").replace(/,/g, "")) : 0;
+
+      // ✅ amount / thstrm_amount / value 지원
+      const raw = item?.thstrm_amount ?? item?.amount ?? item?.value ?? "0";
+      const n = Number(String(raw).replace(/,/g, "").trim());
+      return Number.isFinite(n) ? n : 0;
     };
 
-    // ✅ 주요 재무 항목
-    const netIncome = findVal(["당기순이익", "순이익", "지배기업소유주지분순이익", "분기순이익"]);
-    const equity = findVal(["자본총계", "지배기업의소유주에게귀속되는자본", "지배기업소유주지분", "지배기업소유주에게귀속되는자본"]);
+    // ✅ 주요 재무 항목 (키워드 매칭)
+    const netIncome = findVal(["당기순이익", "순이익", "지배기업소유주지분순이익", "지배주주순이익"]);
+
+    // ⚠️ "자본" 단독 키워드는 너무 넓어서 오탐(자본금/자본잉여금 등) 위험 → 제거
+    const equity = findVal([
+      "자본총계",
+      "지배기업소유주지분",
+      "지배기업의소유주에게귀속되는자본",
+      "지배기업소유주에게귀속되는자본",
+    ]);
+
     const assets = findVal(["자산총계", "자산"]);
     const liabilities = findVal(["부채총계", "부채"]);
     const revenue = findVal(["매출액", "영업수익"]);
     const operatingIncome = findVal(["영업이익"]);
-    const ocf = findVal(["영업활동현금흐름"]);
+    const ocf = findVal(["영업활동현금흐름", "영업활동으로인한현금흐름"]);
 
     const finalEquity = equity > 0 ? equity : assets - liabilities;
 
@@ -81,16 +54,14 @@ export function analyzeValuation(fused: any, marketCap: number) {
     const opm = revenue > 0 ? ((operatingIncome / revenue) * 100).toFixed(2) + "%" : "N/A";
     const fcf_yield = marketCap > 0 ? ((ocf / marketCap) * 100).toFixed(2) + "%" : "N/A";
 
-    const score =
-      [per !== "N/A", pbr !== "N/A", roe !== "N/A", opm !== "N/A"].filter(Boolean).length * 2.5;
+    const score = [per !== "N/A", pbr !== "N/A", roe !== "N/A", opm !== "N/A"].filter(Boolean).length * 2.5;
 
     console.log(
-      `[Valuation✅] PER=${per} | PBR=${pbr} | ROE=${roe} | OPM=${opm} | FCF=${fcf_yield}`
+      `[Valuation✅] rows=${dataList.length} | PER=${per} | PBR=${pbr} | ROE=${roe} | OPM=${opm} | FCF=${fcf_yield}`
     );
 
-    // ✅ buildFullReport() 호환(대문자 키)까지 같이 제공
+    // ✅ 소문자(내부) + ✅ 대문자(리포트 템플릿 호환) 동시 제공
     return {
-      // 소문자 (내부/기존)
       per,
       pbr,
       roe,
@@ -100,7 +71,7 @@ export function analyzeValuation(fused: any, marketCap: number) {
       score,
       asof: "최신 데이터 기준",
 
-      // 대문자 (리포트 템플릿 호환)
+      // 템플릿 호환 키
       PER: per,
       PBR: pbr,
       ROE: roe,
@@ -113,6 +84,57 @@ export function analyzeValuation(fused: any, marketCap: number) {
     console.error("[Valuation ERROR]", e);
     return emptyResult("오류 발생");
   }
+}
+
+/**
+ * ✅ fused 어떤 구조든 "재무 row 배열"을 찾아 반환
+ * - row 조건: (account_nm 존재) AND (amount 또는 thstrm_amount 같은 금액 필드 존재)
+ */
+function extractFinancialRows(input: any): any[] {
+  // 1) 입력이 이미 배열이면 검사 후 반환
+  if (Array.isArray(input)) {
+    if (looksLikeFinancialRowArray(input)) return input;
+    // 배열인데 row가 아닌 경우(예: reports 배열) 내부도 탐색
+    for (const it of input) {
+      const found = extractFinancialRows(it);
+      if (found.length) return found;
+    }
+    return [];
+  }
+
+  // 2) 객체면 흔한 케이스 먼저 체크
+  if (input && typeof input === "object") {
+    // fused.list
+    if (Array.isArray((input as any).list) && looksLikeFinancialRowArray((input as any).list)) {
+      return (input as any).list;
+    }
+    // fused.data
+    if (Array.isArray((input as any).data) && looksLikeFinancialRowArray((input as any).data)) {
+      return (input as any).data;
+    }
+
+    // 3) 재귀 탐색: 모든 value를 훑어서 첫 번째로 매칭되는 배열을 반환
+    for (const v of Object.values(input)) {
+      const found = extractFinancialRows(v);
+      if (found.length) return found;
+    }
+  }
+
+  return [];
+}
+
+function looksLikeFinancialRowArray(arr: any[]): boolean {
+  if (!Array.isArray(arr) || arr.length === 0) return false;
+  // 샘플 몇 개만 보고 판단
+  const sample = arr.slice(0, 10);
+  return sample.some((x) => {
+    if (!x || typeof x !== "object") return false;
+    const hasName =
+      typeof (x as any).account_nm === "string" || typeof (x as any).account_name === "string";
+    const hasAmount =
+      (x as any).thstrm_amount !== undefined || (x as any).amount !== undefined || (x as any).value !== undefined;
+    return hasName && hasAmount;
+  });
 }
 
 function emptyResult(msg: string) {
