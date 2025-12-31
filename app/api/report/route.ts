@@ -27,26 +27,16 @@ export async function GET(req: Request) {
 
     console.log(`[API] Starting Full Report for ${ticker}`);
 
-    // 1️⃣ 펀더멘털 + 시장 데이터(주가, 차트) + 뉴스 수집
+    // 1) 펀더멘털 + 시장 데이터 + 뉴스 수집
     const dartDataset = await fetchFundamentalsFusion(ticker);
     if (!dartDataset || !dartDataset.data) {
       return jsonError(404, "No DART data found (fetch failed)");
     }
 
-    /**
-     * 2️⃣ 데이터 구조 통일 (연도별 재무제표)
-     * dartHandler.ts 반환 형태:
-     * data: {
-     *   [year]: { reprt, raw: [...], parsed: {...} }
-     * }
-     *
-     * ✅ financialFusion.ts는 item.amount를 읽으므로,
-     * DART 원본(thstrm_amount)을 amount로 변환해서 넘겨야 함.
-     */
+    // 2) reports 표준화(원본 row 리스트)
     const reports = Object.entries(dartDataset.data).map(([year, v]: any) => {
       const rawList: any[] = Array.isArray(v?.raw) ? v.raw : [];
 
-      // ✅ DART 원본을 financialFusion이 먹을 수 있게 표준화
       const normalized = rawList.map((row) => ({
         account_nm: row.account_nm ?? "",
         amount: row.thstrm_amount ?? row.amount ?? "0",
@@ -61,26 +51,34 @@ export async function GET(req: Request) {
       };
     });
 
-    // 3️⃣ 병합 (재무제표 융합)
+    // ✅ 최신연도 parsed(정답값) 꺼내기
+    const years = Object.keys(dartDataset.data).map((y) => Number(y)).filter(Number.isFinite);
+    const latestYear = years.length ? Math.max(...years) : null;
+    const latestParsed = latestYear !== null ? (dartDataset.data as any)?.[String(latestYear)]?.parsed : null;
+
+    if (latestYear !== null) {
+      console.log(`[API] latestYear=${latestYear} | parsed=${latestParsed ? "YES" : "NO"}`);
+    }
+
+    // 3) 병합 (재무제표 융합)
     const fused = fuseFinancials(reports);
 
-    // 4️⃣ 밸류에이션 분석 (실시간 시총 반영)
-    const valuation = analyzeValuation(fused, dartDataset.marketCap);
+    // 4) 밸류에이션 분석 (✅ parsed 우선 사용)
+    const valuation = analyzeValuation(fused, dartDataset.marketCap, latestParsed);
 
-    // 5️⃣ 리스크 분석 (뉴스 데이터 반영)
+    // 5) 리스크 분석 (뉴스 반영)
     const risk = await analyzeRisk(fused, dartDataset.news || []);
 
-    // 6️⃣ 퀀트 분석 (가격 시계열 기반)
+    // 6) 퀀트 분석 (가격 시계열 기반)
     const quant = await analyzeQuant(dartDataset.history || []);
 
-    // 7️⃣ 리포트 생성 (텍스트 리포트)
+    // 7) 리포트 생성
     const reportText = buildFullReport(valuation, risk, quant, {
       valuation_score: (valuation as any)?.score ?? "N/A",
       risk_level: (risk as any)?.alert ?? "Unknown",
       signal: (quant as any)?.price_signal ?? "N/A",
     });
 
-    // 8️⃣ 최종 JSON 응답
     return NextResponse.json(
       {
         status: "ok",
@@ -91,7 +89,6 @@ export async function GET(req: Request) {
         marketCap: dartDataset.marketCap,
         price: dartDataset.price,
 
-        // ✅ 원본 + 파싱도 같이 내려주면 디버깅이 쉬움
         dart: dartDataset.data,
 
         fundamental: valuation,

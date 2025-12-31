@@ -1,50 +1,120 @@
 // lib/financialAnalyzer.ts
 
-export function analyzeValuation(fused: any, marketCap: number) {
+/**
+ * analyzeValuation(fused, marketCap, parsed?)
+ * - parsed가 있으면(=dartHandler가 이미 숫자로 확정한 값) 그걸 최우선으로 사용
+ * - parsed가 없을 때만 fused에서 키워드로 추출
+ */
+export function analyzeValuation(fused: any, marketCap: number, parsed?: any) {
   try {
-    // ✅ 어떤 구조든 내부에서 "재무 row 배열"을 찾아서 사용
-    const dataList = extractFinancialRows(fused);
+    // ✅ 0) parsed 우선 소스 (네 로그의 [DART PARSED] 값들이 여기 들어있어야 정상)
+    const parsedNums = normalizeParsed(parsed);
 
-    if (!Array.isArray(dataList) || dataList.length === 0) {
-      console.warn("[Valuation] ❌ No DART financial list found.");
-      // 디버그용: fused 최상위 키라도 찍어두기
-      try {
-        console.warn("[Valuation] fused keys:", fused ? Object.keys(fused) : "null");
-      } catch {}
-      return emptyResult("데이터 없음");
+    // 1) "재무 row 배열" 추출 시도
+    let dataList = extractFinancialRows(fused);
+
+    // 2) fused가 객체(map) 형태면 rows로 강제 변환
+    if ((!Array.isArray(dataList) || dataList.length === 0) && isPlainObject(fused)) {
+      const entries = Object.entries(fused);
+
+      dataList = entries
+        .map(([k, v]) => ({
+          account_nm: String(k),
+          amount: toNumber(pickAmountSmart(v)),
+        }))
+        .filter((row) => row.account_nm.length > 0);
+
+      console.log(`[Valuation✅] fused map→rows forced: rows=${dataList.length}`);
     }
 
-    // ✅ 이름 매칭 함수 (account_nm 기반)
-    const findVal = (keywords: string[]) => {
-      const item = dataList.find((x: any) => {
-        const name = String(x?.account_nm ?? x?.account_name ?? "").replace(/\s/g, "");
-        return keywords.some((kw) => name.includes(kw));
-      });
+    const hasRows = Array.isArray(dataList) && dataList.length > 0;
 
-      // ✅ amount / thstrm_amount / value 지원
+    // ✅ 3) rows 기반 picker(only fallback용)
+    const pickFromRows = (opts: { exact?: string[]; contains?: string[]; exclude?: string[] }) => {
+      if (!hasRows) return { name: null as string | null, value: 0 };
+
+      const exact = (opts.exact ?? []).map(norm);
+      const contains = (opts.contains ?? []).map(norm);
+      const exclude = (opts.exclude ?? []).map(norm);
+
+      let item =
+        dataList.find((x: any) => {
+          const name = norm(x?.account_nm ?? x?.account_name ?? "");
+          if (!name) return false;
+          if (exclude.some((ex) => name.includes(ex))) return false;
+          return exact.includes(name);
+        }) ?? null;
+
+      if (!item && contains.length > 0) {
+        item =
+          dataList.find((x: any) => {
+            const name = norm(x?.account_nm ?? x?.account_name ?? "");
+            if (!name) return false;
+            if (exclude.some((ex) => name.includes(ex))) return false;
+            return contains.some((kw) => name.includes(kw));
+          }) ?? null;
+      }
+
       const raw = item?.thstrm_amount ?? item?.amount ?? item?.value ?? "0";
-      const n = Number(String(raw).replace(/,/g, "").trim());
-      return Number.isFinite(n) ? n : 0;
+      const n = toNumber(raw);
+      return { name: item ? String(item.account_nm ?? item.account_name ?? "") : null, value: Number.isFinite(n) ? n : 0 };
     };
 
-    // ✅ 주요 재무 항목 (키워드 매칭)
-    const netIncome = findVal(["당기순이익", "순이익", "지배기업소유주지분순이익", "지배주주순이익"]);
+    // ✅ 4) 최종 숫자 결정: parsed 우선, 없으면 rows에서
+    const assets =
+      parsedNums.assets ??
+      pickFromRows({ exact: ["자산총계"], contains: ["자산"], exclude: ["유동자산", "비유동자산"] }).value;
 
-    // ⚠️ "자본" 단독 키워드는 너무 넓어서 오탐(자본금/자본잉여금 등) 위험 → 제거
-    const equity = findVal([
-      "자본총계",
-      "지배기업소유주지분",
-      "지배기업의소유주에게귀속되는자본",
-      "지배기업소유주에게귀속되는자본",
-    ]);
+    const liabilities =
+      parsedNums.liabilities ??
+      pickFromRows({ exact: ["부채총계"], contains: ["부채"], exclude: ["유동부채", "비유동부채"] }).value;
 
-    const assets = findVal(["자산총계", "자산"]);
-    const liabilities = findVal(["부채총계", "부채"]);
-    const revenue = findVal(["매출액", "영업수익"]);
-    const operatingIncome = findVal(["영업이익"]);
-    const ocf = findVal(["영업활동현금흐름", "영업활동으로인한현금흐름"]);
+    // equity는 parsed가 있으면 그걸 신뢰. 없으면 자본총계 exact → 그래도 이상하면 assets-liabilities
+    const equityFromRows = pickFromRows({
+      exact: ["자본총계"],
+      contains: [],
+      exclude: ["자본금", "기타자본", "기타불입자본", "기타포괄손익누계액"],
+    }).value;
 
-    const finalEquity = equity > 0 ? equity : assets - liabilities;
+    const equityRaw = parsedNums.equity ?? equityFromRows;
+    const equityFallback = assets > 0 ? assets - liabilities : 0;
+
+    // ✅ sanity check: equity가 너무 작으면(자본금 오탐 케이스) assets-liab로 교정
+    const finalEquity =
+      equityRaw > 0 && equityFallback > 0 && equityRaw < equityFallback * 0.3 ? equityFallback : (equityRaw > 0 ? equityRaw : equityFallback);
+
+    const revenue =
+      parsedNums.revenue ??
+      pickFromRows({ exact: ["매출액"], contains: ["영업수익"], exclude: ["기타수익", "금융수익"] }).value;
+
+    const operatingIncome =
+      parsedNums.operatingIncome ??
+      pickFromRows({ exact: ["영업이익"], contains: [], exclude: [] }).value;
+
+    const ocf =
+      parsedNums.ocf ??
+      pickFromRows({ exact: ["영업활동현금흐름"], contains: ["영업활동으로인한현금흐름"], exclude: [] }).value;
+
+    // netIncome도 parsed 우선. 없으면 '당기순이익' → '분기순이익' 순서
+    const netIncomeFromRowsPrimary = pickFromRows({
+      exact: ["당기순이익"],
+      contains: ["지배기업소유주지분순이익", "지배주주순이익"],
+      exclude: ["기본주당이익", "희석주당이익"],
+    }).value;
+
+    const netIncomeFromRowsFallback = netIncomeFromRowsPrimary > 0
+      ? 0
+      : pickFromRows({
+          exact: ["분기순이익"],
+          contains: ["순이익"],
+          exclude: ["기본주당이익", "희석주당이익"],
+        }).value;
+
+    const netIncome = parsedNums.netIncome ?? (netIncomeFromRowsPrimary > 0 ? netIncomeFromRowsPrimary : netIncomeFromRowsFallback);
+
+    console.log(
+      `[Valuation✅] final picks | netIncome=${netIncome} equity=${finalEquity} assets=${assets} liab=${liabilities} revenue=${revenue} op=${operatingIncome} ocf=${ocf} (parsed=${parsedNums._used ? "YES" : "NO"})`
+    );
 
     // ✅ 계산
     const per = netIncome > 0 ? (marketCap / netIncome).toFixed(2) : "N/A";
@@ -56,11 +126,8 @@ export function analyzeValuation(fused: any, marketCap: number) {
 
     const score = [per !== "N/A", pbr !== "N/A", roe !== "N/A", opm !== "N/A"].filter(Boolean).length * 2.5;
 
-    console.log(
-      `[Valuation✅] rows=${dataList.length} | PER=${per} | PBR=${pbr} | ROE=${roe} | OPM=${opm} | FCF=${fcf_yield}`
-    );
+    console.log(`[Valuation✅] rows=${hasRows ? dataList.length : 0} | PER=${per} | PBR=${pbr} | ROE=${roe} | OPM=${opm} | FCF=${fcf_yield}`);
 
-    // ✅ 소문자(내부) + ✅ 대문자(리포트 템플릿 호환) 동시 제공
     return {
       per,
       pbr,
@@ -71,7 +138,6 @@ export function analyzeValuation(fused: any, marketCap: number) {
       score,
       asof: "최신 데이터 기준",
 
-      // 템플릿 호환 키
       PER: per,
       PBR: pbr,
       ROE: roe,
@@ -86,15 +152,61 @@ export function analyzeValuation(fused: any, marketCap: number) {
   }
 }
 
+/* ---------------- helpers ---------------- */
+
+function normalizeParsed(parsed: any): {
+  _used: boolean;
+  assets: number | null;
+  equity: number | null;
+  liabilities: number | null;
+  revenue: number | null;
+  operatingIncome: number | null;
+  netIncome: number | null;
+  ocf: number | null;
+} {
+  if (!parsed || typeof parsed !== "object") {
+    return { _used: false, assets: null, equity: null, liabilities: null, revenue: null, operatingIncome: null, netIncome: null, ocf: null };
+  }
+
+  // dartHandler 쪽 키 네이밍이 바뀔 수 있으니 넓게 대응
+  const assets = pickNum(parsed, ["Assets", "assets", "asset", "자산총계"]);
+  const equity = pickNum(parsed, ["Equity", "equity", "자본총계"]);
+  const liabilities = pickNum(parsed, ["Liabilities", "liabilities", "부채총계"]);
+  const revenue = pickNum(parsed, ["Revenue", "revenue", "매출", "매출액"]);
+  const operatingIncome = pickNum(parsed, ["OperatingIncome", "operatingIncome", "영업이익"]);
+  const netIncome = pickNum(parsed, ["NetIncome", "netIncome", "당기순이익", "순이익"]);
+  const ocf = pickNum(parsed, ["OCF", "ocf", "영업활동현금흐름"]);
+
+  const used = [assets, equity, liabilities, revenue, operatingIncome, netIncome, ocf].some((v) => typeof v === "number" && Number.isFinite(v));
+
+  return {
+    _used: used,
+    assets: Number.isFinite(assets as any) ? (assets as number) : null,
+    equity: Number.isFinite(equity as any) ? (equity as number) : null,
+    liabilities: Number.isFinite(liabilities as any) ? (liabilities as number) : null,
+    revenue: Number.isFinite(revenue as any) ? (revenue as number) : null,
+    operatingIncome: Number.isFinite(operatingIncome as any) ? (operatingIncome as number) : null,
+    netIncome: Number.isFinite(netIncome as any) ? (netIncome as number) : null,
+    ocf: Number.isFinite(ocf as any) ? (ocf as number) : null,
+  };
+}
+
+function pickNum(obj: any, keys: string[]): number {
+  for (const k of keys) {
+    if (obj?.[k] !== undefined) {
+      const n = toNumber(obj[k]);
+      if (Number.isFinite(n)) return n;
+    }
+  }
+  return NaN;
+}
+
 /**
- * ✅ fused 어떤 구조든 "재무 row 배열"을 찾아 반환
- * - row 조건: (account_nm 존재) AND (amount 또는 thstrm_amount 같은 금액 필드 존재)
+ * fused 어떤 구조든 "재무 row 배열"을 찾아 반환
  */
 function extractFinancialRows(input: any): any[] {
-  // 1) 입력이 이미 배열이면 검사 후 반환
   if (Array.isArray(input)) {
     if (looksLikeFinancialRowArray(input)) return input;
-    // 배열인데 row가 아닌 경우(예: reports 배열) 내부도 탐색
     for (const it of input) {
       const found = extractFinancialRows(it);
       if (found.length) return found;
@@ -102,18 +214,14 @@ function extractFinancialRows(input: any): any[] {
     return [];
   }
 
-  // 2) 객체면 흔한 케이스 먼저 체크
   if (input && typeof input === "object") {
-    // fused.list
     if (Array.isArray((input as any).list) && looksLikeFinancialRowArray((input as any).list)) {
       return (input as any).list;
     }
-    // fused.data
     if (Array.isArray((input as any).data) && looksLikeFinancialRowArray((input as any).data)) {
       return (input as any).data;
     }
 
-    // 3) 재귀 탐색: 모든 value를 훑어서 첫 번째로 매칭되는 배열을 반환
     for (const v of Object.values(input)) {
       const found = extractFinancialRows(v);
       if (found.length) return found;
@@ -125,16 +233,45 @@ function extractFinancialRows(input: any): any[] {
 
 function looksLikeFinancialRowArray(arr: any[]): boolean {
   if (!Array.isArray(arr) || arr.length === 0) return false;
-  // 샘플 몇 개만 보고 판단
   const sample = arr.slice(0, 10);
   return sample.some((x) => {
     if (!x || typeof x !== "object") return false;
-    const hasName =
-      typeof (x as any).account_nm === "string" || typeof (x as any).account_name === "string";
-    const hasAmount =
-      (x as any).thstrm_amount !== undefined || (x as any).amount !== undefined || (x as any).value !== undefined;
+    const hasName = typeof (x as any).account_nm === "string" || typeof (x as any).account_name === "string";
+    const hasAmount = (x as any).thstrm_amount !== undefined || (x as any).amount !== undefined || (x as any).value !== undefined;
     return hasName && hasAmount;
   });
+}
+
+function isPlainObject(v: any): boolean {
+  return v && typeof v === "object" && !Array.isArray(v);
+}
+
+function norm(s: any): string {
+  return String(s ?? "").replace(/\s/g, "").trim();
+}
+
+function pickAmountSmart(v: any): any {
+  if (v === null || v === undefined) return 0;
+  if (typeof v === "number" || typeof v === "string") return v;
+
+  if (typeof v === "object" && !Array.isArray(v)) {
+    const keys = Object.keys(v as any);
+    const yearKeys = keys.filter((k) => /^\d{4}$/.test(k));
+    if (yearKeys.length > 0 && yearKeys.length === keys.length) {
+      const latestYear = yearKeys.sort((a, b) => Number(b) - Number(a))[0];
+      return (v as any)[latestYear];
+    }
+  }
+
+  return 0;
+}
+
+function toNumber(v: unknown): number {
+  if (v === null || v === undefined) return NaN;
+  if (typeof v === "number") return v;
+  const s = String(v).replace(/,/g, "").trim();
+  const n = Number(s);
+  return Number.isFinite(n) ? n : NaN;
 }
 
 function emptyResult(msg: string) {
@@ -148,7 +285,6 @@ function emptyResult(msg: string) {
     score: 0,
     asof: msg,
 
-    // ✅ 리포트 템플릿 호환
     PER: "N/A",
     PBR: "N/A",
     ROE: "N/A",
