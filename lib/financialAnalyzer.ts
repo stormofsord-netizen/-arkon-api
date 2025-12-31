@@ -81,7 +81,11 @@ export function analyzeValuation(fused: any, marketCap: number, parsed?: any) {
 
     // ✅ sanity check: equity가 너무 작으면(자본금 오탐 케이스) assets-liab로 교정
     const finalEquity =
-      equityRaw > 0 && equityFallback > 0 && equityRaw < equityFallback * 0.3 ? equityFallback : (equityRaw > 0 ? equityRaw : equityFallback);
+      equityRaw > 0 && equityFallback > 0 && equityRaw < equityFallback * 0.3
+        ? equityFallback
+        : equityRaw > 0
+          ? equityRaw
+          : equityFallback;
 
     const revenue =
       parsedNums.revenue ??
@@ -102,13 +106,14 @@ export function analyzeValuation(fused: any, marketCap: number, parsed?: any) {
       exclude: ["기본주당이익", "희석주당이익"],
     }).value;
 
-    const netIncomeFromRowsFallback = netIncomeFromRowsPrimary > 0
-      ? 0
-      : pickFromRows({
-          exact: ["분기순이익"],
-          contains: ["순이익"],
-          exclude: ["기본주당이익", "희석주당이익"],
-        }).value;
+    const netIncomeFromRowsFallback =
+      netIncomeFromRowsPrimary > 0
+        ? 0
+        : pickFromRows({
+            exact: ["분기순이익"],
+            contains: ["순이익"],
+            exclude: ["기본주당이익", "희석주당이익"],
+          }).value;
 
     const netIncome = parsedNums.netIncome ?? (netIncomeFromRowsPrimary > 0 ? netIncomeFromRowsPrimary : netIncomeFromRowsFallback);
 
@@ -170,12 +175,35 @@ function normalizeParsed(parsed: any): {
 
   // dartHandler 쪽 키 네이밍이 바뀔 수 있으니 넓게 대응
   const assets = pickNum(parsed, ["Assets", "assets", "asset", "자산총계"]);
-  const equity = pickNum(parsed, ["Equity", "equity", "자본총계"]);
+  let equity = pickNum(parsed, ["Equity", "equity", "자본총계"]);
   const liabilities = pickNum(parsed, ["Liabilities", "liabilities", "부채총계"]);
   const revenue = pickNum(parsed, ["Revenue", "revenue", "매출", "매출액"]);
   const operatingIncome = pickNum(parsed, ["OperatingIncome", "operatingIncome", "영업이익"]);
   const netIncome = pickNum(parsed, ["NetIncome", "netIncome", "당기순이익", "순이익"]);
   const ocf = pickNum(parsed, ["OCF", "ocf", "영업활동현금흐름"]);
+
+  // ✅ 핵심 수정:
+  // Equity가 '자본금'으로 오염되는 케이스가 있어서(=너 로그처럼 Equity가 수십억 수준)
+  // Assets/Liabilities가 동시에 있으면 assets-liabilities로 sanity 교정해서 상위 모듈들(RISK 포함)도 안전하게 만든다.
+  const assetsOK = Number.isFinite(assets as any);
+  const liabOK = Number.isFinite(liabilities as any);
+  const eqOK = Number.isFinite(equity as any);
+
+  if (assetsOK && liabOK) {
+    const eqFallback = (assets as number) - (liabilities as number);
+
+    // eqFallback이 정상 범위(>0)일 때만 적용
+    if (Number.isFinite(eqFallback) && eqFallback > 0) {
+      // equity가 너무 작으면(자본금 오탐) → 교정
+      if (!eqOK || (equity as number) <= 0 || (equity as number) < eqFallback * 0.3) {
+        const before = eqOK ? equity : NaN;
+        equity = eqFallback;
+        console.log(
+          `[Valuation✅] normalizeParsed equity corrected: before=${Number.isFinite(before as any) ? before : "N/A"} → after=${equity} (assets-liab=${eqFallback})`
+        );
+      }
+    }
+  }
 
   const used = [assets, equity, liabilities, revenue, operatingIncome, netIncome, ocf].some((v) => typeof v === "number" && Number.isFinite(v));
 
