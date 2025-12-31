@@ -1,67 +1,49 @@
 // app/lib/priceFetcher.ts
-// 네이버 금융 API를 통해 실시간 시세와 차트 데이터를 가져옵니다.
+import axios from "axios";
 
-export interface MarketData {
-  price: number;       // 현재가
-  shares: number;      // 상장주식수
-  marketCap: number;   // 시가총액 (원)
-  history: PriceCandle[]; // 일봉 데이터 (최근 1년)
-}
+export async function fetchMarketData(ticker: string) {
+  console.log(`[KRX] Fetching data for ${ticker} ...`);
 
-export interface PriceCandle {
-  date: string;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume: number;
-}
+  const authKey = process.env.KRX_AUTH_KEY;
+  if (!authKey) {
+    console.error("[KRX❌] Missing KRX_AUTH_KEY");
+    return { price: 0, marketCap: 0, history: [] };
+  }
 
-export async function fetchMarketData(ticker: string): Promise<MarketData | null> {
+  // KRX에서 사용하는 8자리 코드 변환
+  const isuSrtCd = ticker.padStart(8, "0");
+  const url = "http://data-dbg.krx.co.kr/svc/apis/sto/stk_bydd_trd";
+  const headers = { AUTH_KEY: authKey };
+  const today = new Date();
+  const yester = new Date(today);
+  yester.setDate(today.getDate() - 1);
+  const basDd = yester.toISOString().slice(0, 10).replace(/-/g, "");
+
   try {
-    // 1. 현재가 및 주식수 조회 (네이버 모바일 API)
-    const basicUrl = `https://m.stock.naver.com/api/stock/${ticker}/basic`;
-    const basicRes = await fetch(basicUrl, { cache: 'no-store' });
-    const basicJson = await basicRes.json();
+    // KRX API 호출
+    const { data } = await axios.get(url, {
+      headers,
+      params: { basDd, isuSrtCd },
+      timeout: 10000,
+    });
 
-    if (!basicJson || !basicJson.closePrice) {
-      console.error(`[PriceFetcher] No basic data for ${ticker}`);
-      return null;
+    if (!data || !data.OutBlock_1) {
+      console.warn(`[KRX❌] No data returned for ${ticker}`);
+      return { price: 0, marketCap: 0, history: [] };
     }
 
-    // 데이터 파싱 (문자열에 있는 콤마 제거)
-    const closePrice = parseInt(basicJson.closePrice.replace(/,/g, ''), 10);
-    const listedShares = parseInt(basicJson.stockInfo.listedSharesCount.replace(/,/g, ''), 10);
-    const marketCap = closePrice * listedShares;
+    const record = data.OutBlock_1[0];
+    const price = Number(record.TDD_CLSPRC || 0);
+    const shares = Number(record.LIST_SHRS || 0);
+    const marketCap = Number(record.MKTCAP || price * shares);
 
-    // 2. 일봉 차트 데이터 조회 (365일치)
-    // periodType=dayRange&range=365
-    const chartUrl = `https://api.stock.naver.com/chart/domestic/item/${ticker}/day?periodType=dayRange&range=365`;
-    const chartRes = await fetch(chartUrl, { cache: 'no-store' });
-    const chartJson = await chartRes.json();
+    console.log(
+      `[KRX✅] ${ticker} | Price: ${price.toLocaleString()} | Shares: ${shares.toLocaleString()} | MarketCap: ${marketCap.toLocaleString()}`
+    );
 
-    let history: PriceCandle[] = [];
-    
-    if (Array.isArray(chartJson)) {
-      history = chartJson.map((item: any) => ({
-        date: item.localDate, // YYYYMMDD
-        open: item.openPrice,
-        high: item.highPrice,
-        low: item.lowPrice,
-        close: item.closePrice,
-        volume: item.accumulatedTradingVolume
-      }));
-    }
-
-    return {
-      price: closePrice,
-      shares: listedShares,
-      marketCap: marketCap,
-      history: history
-    };
-
-  } catch (e) {
-    console.error(`[PriceFetcher] Error fetching data for ${ticker}:`, e);
-    return null;
+    return { price, marketCap, history: [] };
+  } catch (err: any) {
+    console.error(`[KRX❌] ${ticker}: ${err.message}`);
+    return { price: 0, marketCap: 0, history: [] };
   }
 }

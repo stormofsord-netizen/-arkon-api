@@ -1,14 +1,14 @@
+// app/api/report/route.ts
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-// ✅ 라이브러리 경로 확인 (@/lib)
 import { fetchFundamentalsFusion } from "@/lib/dartHandler";
 import { fuseFinancials } from "@/lib/financialFusion";
 import { analyzeValuation } from "@/lib/financialAnalyzer";
 import { analyzeRisk } from "@/lib/riskAnalyzer";
 import { analyzeQuant } from "@/lib/quantAnalyzer";
-import { buildReport } from "@/lib/reportBuilder";
+import { buildFullReport } from "@/lib/reportBuilder";
 
 // 에러 응답 헬퍼 함수
 function jsonError(status: number, message: string, extra?: Record<string, unknown>) {
@@ -28,19 +28,38 @@ export async function GET(req: Request) {
     console.log(`[API] Starting Full Report for ${ticker}`);
 
     // 1️⃣ 펀더멘털 + 시장 데이터(주가, 차트) + 뉴스 수집
-    // (dartHandler가 내부적으로 priceFetcher와 newsFetcher를 모두 호출합니다)
     const dartDataset = await fetchFundamentalsFusion(ticker);
-    
     if (!dartDataset || !dartDataset.data) {
-        return jsonError(404, "No DART data found (fetch failed)");
+      return jsonError(404, "No DART data found (fetch failed)");
     }
 
-    // 2️⃣ 데이터 구조 통일 (연도별 재무제표)
-    const reports = Object.entries(dartDataset.data).map(([year, v]: any) => ({
-      year: Number(year),
-      reprt: v.reprt ?? "11011",
-      data: v.data ?? [],
-    }));
+    /**
+     * 2️⃣ 데이터 구조 통일 (연도별 재무제표)
+     * dartHandler.ts 반환 형태:
+     * data: {
+     *   [year]: { reprt, raw: [...], parsed: {...} }
+     * }
+     *
+     * ✅ financialFusion.ts는 item.amount를 읽으므로,
+     * DART 원본(thstrm_amount)을 amount로 변환해서 넘겨야 함.
+     */
+    const reports = Object.entries(dartDataset.data).map(([year, v]: any) => {
+      const rawList: any[] = Array.isArray(v?.raw) ? v.raw : [];
+
+      // ✅ DART 원본을 financialFusion이 먹을 수 있게 표준화
+      const normalized = rawList.map((row) => ({
+        account_nm: row.account_nm ?? "",
+        amount: row.thstrm_amount ?? row.amount ?? "0",
+        ord: row.ord,
+        type: row.sj_div ?? row.sj_nm,
+      }));
+
+      return {
+        year: Number(year),
+        reprt: v?.reprt ?? "11011",
+        data: normalized,
+      };
+    });
 
     // 3️⃣ 병합 (재무제표 융합)
     const fused = fuseFinancials(reports);
@@ -48,40 +67,42 @@ export async function GET(req: Request) {
     // 4️⃣ 밸류에이션 분석 (실시간 시총 반영)
     const valuation = analyzeValuation(fused, dartDataset.marketCap);
 
-    // ✅ 5️⃣ 리스크 분석 (뉴스 데이터 연동 완료!)
-    // dartHandler에서 가져온 최신 뉴스 제목들을 리스크 분석기에 전달합니다.
+    // 5️⃣ 리스크 분석 (뉴스 데이터 반영)
     const risk = await analyzeRisk(fused, dartDataset.news || []);
 
-    // ✅ 6️⃣ 퀀트 분석 (네이버 1년치 일봉 데이터 연동 완료!)
+    // 6️⃣ 퀀트 분석 (가격 시계열 기반)
     const quant = await analyzeQuant(dartDataset.history || []);
 
-    // 7️⃣ 리포트 통합 (텍스트 생성)
-    const rawReport = await buildReport(fused, [], dartDataset.marketCap);
-    
-    // 타입 에러 방지용 (any 처리)
-    const report = rawReport as any;
+    // 7️⃣ 리포트 생성 (텍스트 리포트)
+    const reportText = buildFullReport(valuation, risk, quant, {
+      valuation_score: (valuation as any)?.score ?? "N/A",
+      risk_level: (risk as any)?.alert ?? "Unknown",
+      signal: (quant as any)?.price_signal ?? "N/A",
+    });
 
-    // 8️⃣ 요약 정보 생성
-    const summary = {
-      valuation_score: valuation?.score ?? 0,
-      risk_level: risk?.alert ?? "Unknown",
-      signal: quant?.price_signal ?? "N/A", // 퀀트 분석 결과 반영
-    };
-
-    // ✅ 최종 응답 (GPT가 읽을 JSON)
+    // 8️⃣ 최종 JSON 응답
     return NextResponse.json(
       {
         status: "ok",
         system: "ARKON-JANUS v3.6.3",
-        asof: new Date().toISOString().split('T')[0], // 오늘 날짜
+        asof: "2025년 기준",
         generated_at: new Date().toISOString(),
         corp_code: dartDataset.corp_code,
-        marketCap: dartDataset.marketCap, // 실시간 시가총액
-        price: dartDataset.price,         // 실시간 주가
-        fundamental: report?.fundamental ?? null,
-        risk, // 뉴스 분석 결과 포함됨
-        quant, // 지지/저항, ATR 포함됨
-        summary,
+        marketCap: dartDataset.marketCap,
+        price: dartDataset.price,
+
+        // ✅ 원본 + 파싱도 같이 내려주면 디버깅이 쉬움
+        dart: dartDataset.data,
+
+        fundamental: valuation,
+        risk,
+        quant,
+        summary: {
+          valuation_score: (valuation as any)?.score ?? "N/A",
+          risk_level: (risk as any)?.alert ?? "Unknown",
+          signal: (quant as any)?.price_signal ?? "N/A",
+        },
+        report_text: reportText,
       },
       {
         headers: {
