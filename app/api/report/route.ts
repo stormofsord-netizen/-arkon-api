@@ -1,6 +1,8 @@
 // app/api/report/route.ts
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const revalidate = 0; // 👈 ⚡ 이 줄이 핵심! (캐시 절대 금지)
+export const fetchCache = "force-no-store"; // 👈 ⚡ 이것도 추가!
 
 import { NextResponse } from "next/server";
 import { fetchFundamentalsFusion } from "@/lib/dartHandler";
