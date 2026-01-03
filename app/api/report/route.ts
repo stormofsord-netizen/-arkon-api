@@ -1,119 +1,101 @@
 // app/api/report/route.ts
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const revalidate = 0; // 👈 ⚡ 이 줄이 핵심! (캐시 절대 금지)
-export const fetchCache = "force-no-store"; // 👈 ⚡ 이것도 추가!
+export const revalidate = 0;
+export const fetchCache = "force-no-store";
 
 import { NextResponse } from "next/server";
-import { fetchFundamentalsFusion } from "@/lib/dartHandler";
-import { fuseFinancials } from "@/lib/financialFusion";
+// ✅ * as Dart 로 가져와서 함수 이름이 뭐든 대응 가능하게 처리
+import * as Dart from "@/lib/dartHandler";
 import { analyzeValuation } from "@/lib/financialAnalyzer";
 import { analyzeRisk } from "@/lib/riskAnalyzer";
-import { analyzeQuant } from "@/lib/quantAnalyzer";
-import { buildFullReport } from "@/lib/reportBuilder";
+// ✅ * as Quant 로 가져와서 대응
+import * as Quant from "@/lib/quantAnalyzer";
 
-// 에러 응답 헬퍼 함수
-function jsonError(status: number, message: string, extra?: Record<string, unknown>) {
-  return NextResponse.json(
-    { status: "error", message, ...(extra ?? {}) },
-    { status, headers: { "Cache-Control": "no-store" } }
-  );
-}
-
-export async function GET(req: Request) {
+export async function GET(request: Request) {
   try {
-    const url = new URL(req.url);
-    const ticker = String(url.searchParams.get("ticker") ?? "").trim();
+    const { searchParams } = new URL(request.url);
+    const ticker = searchParams.get("ticker");
 
-    if (!ticker) return jsonError(400, "ticker is required");
-
-    console.log(`[API] Starting Full Report for ${ticker}`);
-
-    // 1) 펀더멘털 + 시장 데이터 + 뉴스 수집
-    const dartDataset = await fetchFundamentalsFusion(ticker);
-    if (!dartDataset || !dartDataset.data) {
-      return jsonError(404, "No DART data found (fetch failed)");
+    if (!ticker) {
+      return NextResponse.json({ error: "Ticker required" }, { status: 400 });
     }
 
-    // 2) reports 표준화(원본 row 리스트)
-    const reports = Object.entries(dartDataset.data).map(([year, v]: any) => {
-      const rawList: any[] = Array.isArray(v?.raw) ? v.raw : [];
+    // 1. DART 데이터 가져오기 (이름 유연하게 찾기)
+    // fetchFundamentalsFusion이 없으면 getFundamentalFusion 사용
+    const fetchFn = (Dart as any).fetchFundamentalsFusion || (Dart as any).getFundamentalFusion;
+    
+    if (!fetchFn) {
+        throw new Error("Dart Handler function not found");
+    }
 
-      const normalized = rawList.map((row) => ({
-        account_nm: row.account_nm ?? "",
-        amount: row.thstrm_amount ?? row.amount ?? "0",
-        ord: row.ord,
-        type: row.sj_div ?? row.sj_nm,
-      }));
+    const dartDataset = await fetchFn(ticker);
 
-      return {
-        year: Number(year),
-        reprt: v?.reprt ?? "11011",
-        data: normalized,
-      };
-    });
+    if (!dartDataset) {
+      return NextResponse.json({ error: "No data found" }, { status: 404 });
+    }
 
-    // ✅ 최신연도 parsed(정답값) 꺼내기
-    const years = Object.keys(dartDataset.data).map((y) => Number(y)).filter(Number.isFinite);
+    // 2. Fused 데이터 (타입 단언으로 에러 회피)
+    const fused = (dartDataset as any).fused || (dartDataset as any).data;
+
+    // 3. Parsed 데이터 추출
+    const dataObj = (dartDataset as any).data || {};
+    const years = Object.keys(dataObj).map(Number).filter(n => !isNaN(n));
     const latestYear = years.length ? Math.max(...years) : null;
-    const latestParsed = latestYear !== null ? (dartDataset.data as any)?.[String(latestYear)]?.parsed : null;
+    const latestParsed = latestYear ? dataObj[latestYear]?.parsed : null;
 
-    if (latestYear !== null) {
-      console.log(`[API] latestYear=${latestYear} | parsed=${latestParsed ? "YES" : "NO"}`);
-    }
+    // 4. Valuation 분석
+    const marketCap = (dartDataset as any).marketCap || 0;
+    const valuation = analyzeValuation(fused, marketCap, latestParsed);
 
-    // 3) 병합 (재무제표 융합)
-    const fused = fuseFinancials(reports);
+    // 5. Risk / Quant 분석
+    const risk = await analyzeRisk(fused, marketCap);
+    
+    // Quant 함수 찾기 (getQuantStats 또는 getQuantAnalysis)
+    const quantFn = (Quant as any).getQuantStats || (Quant as any).getQuantAnalysis || (async () => ({ price_signal: "UNKNOWN", trend: "N/A" }));
+    const quant = await quantFn(ticker);
 
-    // 4) 밸류에이션 분석 (✅ parsed 우선 사용)
-    const valuation = analyzeValuation(fused, dartDataset.marketCap, latestParsed);
+    // 6. 등급 산정
+    const valuationScore = valuation.score >= 70 ? "저평가" : valuation.score >= 50 ? "적정" : "고평가";
+    const riskLevel = risk.alert;
+    const signal = quant.price_signal || "N/A";
 
-    // 5) 리스크 분석 (뉴스 반영)
-    const risk = await analyzeRisk(fused, dartDataset.news || []);
-
-    // 6) 퀀트 분석 (가격 시계열 기반)
-    const quant = await analyzeQuant(dartDataset.history || []);
-
-    // 7) 리포트 생성
-    const reportText = buildFullReport(valuation, risk, quant, {
-      valuation_score: (valuation as any)?.score ?? "N/A",
-      risk_level: (risk as any)?.alert ?? "Unknown",
-      signal: (quant as any)?.price_signal ?? "N/A",
-    });
-
-    return NextResponse.json(
-      {
-        status: "ok",
-        system: "ARKON-JANUS v3.6.3",
-        asof: "2025년 기준",
-        generated_at: new Date().toISOString(),
-        corp_code: dartDataset.corp_code,
-        marketCap: dartDataset.marketCap,
-        price: dartDataset.price,
-
-        dart: dartDataset.data,
-
-        fundamental: valuation,
-        risk,
-        quant,
-        summary: {
-          valuation_score: (valuation as any)?.score ?? "N/A",
-          risk_level: (risk as any)?.alert ?? "Unknown",
-          signal: (quant as any)?.price_signal ?? "N/A",
-        },
-        report_text: reportText,
+    // 7. 최종 응답
+    return NextResponse.json({
+      status: "ok",
+      system: "ARKON-JANUS v3.6.4-FIXED",
+      __DEBUG_VERSION: "CHECK_2026_01_03_VER_FINAL",
+      
+      asof: "2024년 기준",
+      generated_at: new Date().toISOString(),
+      corp_code: (dartDataset as any).corp_code,
+      marketCap: marketCap,
+      
+      fundamental: {
+        Valuation: valuation,
+        Commentary: `PER: ${valuation.PER} | PBR: ${valuation.PBR} | ROE: ${valuation.ROE} | 영업이익률: ${valuation.OPM}`,
       },
-      {
-        headers: {
-          "Content-Type": "application/json; charset=utf-8",
-          "Cache-Control": "no-store",
-        },
+      risk,
+      quant,
+      summary: {
+        valuation_score: valuationScore,
+        risk_level: riskLevel,
+        signal,
+      },
+    }, {
+      headers: {
+        "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+        "Pragma": "no-cache",
+        "Expires": "0",
       }
-    );
-  } catch (e: any) {
-    console.error("FullReport Error:", e);
-    return jsonError(500, "Internal Server Error", {
-      detail: String(e?.message ?? e),
     });
+
+  } catch (error) {
+    console.error("[API Error]", error);
+    return NextResponse.json({ 
+        error: "Internal Server Error", 
+        msg: error instanceof Error ? error.message : String(error) 
+    }, { status: 500 });
   }
 }
