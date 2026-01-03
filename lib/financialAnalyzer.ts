@@ -7,8 +7,15 @@
  */
 export function analyzeValuation(fused: any, marketCap: number, parsed?: any) {
   try {
+    // ⚡ 진단 로그 (이걸 보면 모든 게 명확해집니다)
+    console.log(`[VALUATION DEBUG] parsed=${parsed ? "EXISTS" : "NULL"}`);
+    if (parsed) {
+      console.log(`[VALUATION DEBUG] parsed.OperatingIncome=${parsed.OperatingIncome}, parsed.Revenue=${parsed.Revenue}`);
+    }
+
     // ✅ 0) parsed 우선 소스 (네 로그의 [DART PARSED] 값들이 여기 들어있어야 정상)
     const parsedNums = normalizeParsed(parsed);
+    console.log(`[VALUATION DEBUG] parsedNums.operatingIncome=${parsedNums.operatingIncome}, parsedNums.revenue=${parsedNums.revenue}`);
 
     // 1) "재무 row 배열" 추출 시도
     let dataList = extractFinancialRows(fused);
@@ -157,7 +164,6 @@ export function analyzeValuation(fused: any, marketCap: number, parsed?: any) {
   }
 }
 
-
 /* ---------------- helpers ---------------- */
 
 function normalizeParsed(parsed: any): {
@@ -171,7 +177,16 @@ function normalizeParsed(parsed: any): {
   ocf: number | null;
 } {
   if (!parsed || typeof parsed !== "object") {
-    return { _used: false, assets: null, equity: null, liabilities: null, revenue: null, operatingIncome: null, netIncome: null, ocf: null };
+    return {
+      _used: false,
+      assets: null,
+      equity: null,
+      liabilities: null,
+      revenue: null,
+      operatingIncome: null,
+      netIncome: null,
+      ocf: null,
+    };
   }
 
   // dartHandler 쪽 키 네이밍이 바뀔 수 있으니 넓게 대응
@@ -194,7 +209,7 @@ function normalizeParsed(parsed: any): {
   ) {
     console.warn(
       `[Valuation✅] SANITY CHECK: OperatingIncome (${operatingIncome}) > Revenue (${revenue}). ` +
-      `This is physically impossible. Forcing OperatingIncome = 0 to prevent OPM hallucination.`
+        `This is physically impossible. Forcing OperatingIncome = 0 to prevent OPM hallucination.`
     );
     operatingIncome = 0;
   }
@@ -222,7 +237,9 @@ function normalizeParsed(parsed: any): {
     }
   }
 
-  const used = [assets, equity, liabilities, revenue, operatingIncome, netIncome, ocf].some((v) => typeof v === "number" && Number.isFinite(v));
+  const used = [assets, equity, liabilities, revenue, operatingIncome, netIncome, ocf].some(
+    (v) => typeof v === "number" && Number.isFinite(v)
+  );
 
   return {
     _used: used,
@@ -236,7 +253,6 @@ function normalizeParsed(parsed: any): {
   };
 }
 
-
 function pickNum(obj: any, keys: string[]): number {
   for (const k of keys) {
     if (obj?.[k] !== undefined) {
@@ -246,7 +262,6 @@ function pickNum(obj: any, keys: string[]): number {
   }
   return NaN;
 }
-
 
 /**
  * fused 어떤 구조든 "재무 row 배열"을 찾아 반환
@@ -278,28 +293,25 @@ function extractFinancialRows(input: any): any[] {
   return [];
 }
 
-
 function looksLikeFinancialRowArray(arr: any[]): boolean {
   if (!Array.isArray(arr) || arr.length === 0) return false;
   const sample = arr.slice(0, 10);
   return sample.some((x) => {
     if (!x || typeof x !== "object") return false;
     const hasName = typeof (x as any).account_nm === "string" || typeof (x as any).account_name === "string";
-    const hasAmount = (x as any).thstrm_amount !== undefined || (x as any).amount !== undefined || (x as any).value !== undefined;
+    const hasAmount =
+      (x as any).thstrm_amount !== undefined || (x as any).amount !== undefined || (x as any).value !== undefined;
     return hasName && hasAmount;
   });
 }
-
 
 function isPlainObject(v: any): boolean {
   return v && typeof v === "object" && !Array.isArray(v);
 }
 
-
 function norm(s: any): string {
   return String(s ?? "").replace(/\s/g, "").trim();
 }
-
 
 function pickAmountSmart(v: any): any {
   if (v === null || v === undefined) return 0;
@@ -317,7 +329,6 @@ function pickAmountSmart(v: any): any {
   return 0;
 }
 
-
 function toNumber(v: unknown): number {
   if (v === null || v === undefined) return NaN;
   if (typeof v === "number") return v;
@@ -325,7 +336,6 @@ function toNumber(v: unknown): number {
   const n = Number(s);
   return Number.isFinite(n) ? n : NaN;
 }
-
 
 function emptyResult(msg: string) {
   return {
