@@ -157,6 +157,7 @@ export function analyzeValuation(fused: any, marketCap: number, parsed?: any) {
   }
 }
 
+
 /* ---------------- helpers ---------------- */
 
 function normalizeParsed(parsed: any): {
@@ -178,11 +179,27 @@ function normalizeParsed(parsed: any): {
   let equity = pickNum(parsed, ["Equity", "equity", "자본총계"]);
   const liabilities = pickNum(parsed, ["Liabilities", "liabilities", "부채총계"]);
   const revenue = pickNum(parsed, ["Revenue", "revenue", "매출", "매출액"]);
-  const operatingIncome = pickNum(parsed, ["OperatingIncome", "operatingIncome", "영업이익"]);
+  let operatingIncome = pickNum(parsed, ["OperatingIncome", "operatingIncome", "영업이익"]); // let으로 변경
   const netIncome = pickNum(parsed, ["NetIncome", "netIncome", "당기순이익", "순이익"]);
   const ocf = pickNum(parsed, ["OCF", "ocf", "영업활동현금흐름"]);
 
-  // ✅ 핵심 수정:
+  // ✅ [NEW] Sanity Check: OperatingIncome > Revenue 감지 시 강제 0
+  // 이 부분이 OPM 160% 문제를 해결하는 핵심 로직입니다.
+  if (
+    Number.isFinite(operatingIncome as any) &&
+    Number.isFinite(revenue as any) &&
+    (operatingIncome as number) > 0 &&
+    (revenue as number) > 0 &&
+    (operatingIncome as number) > (revenue as number)
+  ) {
+    console.warn(
+      `[Valuation✅] SANITY CHECK: OperatingIncome (${operatingIncome}) > Revenue (${revenue}). ` +
+      `This is physically impossible. Forcing OperatingIncome = 0 to prevent OPM hallucination.`
+    );
+    operatingIncome = 0;
+  }
+
+  // ✅ Equity Sanity Check (기존)
   // Equity가 '자본금'으로 오염되는 케이스가 있어서(=너 로그처럼 Equity가 수십억 수준)
   // Assets/Liabilities가 동시에 있으면 assets-liabilities로 sanity 교정해서 상위 모듈들(RISK 포함)도 안전하게 만든다.
   const assetsOK = Number.isFinite(assets as any);
@@ -219,6 +236,7 @@ function normalizeParsed(parsed: any): {
   };
 }
 
+
 function pickNum(obj: any, keys: string[]): number {
   for (const k of keys) {
     if (obj?.[k] !== undefined) {
@@ -228,6 +246,7 @@ function pickNum(obj: any, keys: string[]): number {
   }
   return NaN;
 }
+
 
 /**
  * fused 어떤 구조든 "재무 row 배열"을 찾아 반환
@@ -259,6 +278,7 @@ function extractFinancialRows(input: any): any[] {
   return [];
 }
 
+
 function looksLikeFinancialRowArray(arr: any[]): boolean {
   if (!Array.isArray(arr) || arr.length === 0) return false;
   const sample = arr.slice(0, 10);
@@ -270,13 +290,16 @@ function looksLikeFinancialRowArray(arr: any[]): boolean {
   });
 }
 
+
 function isPlainObject(v: any): boolean {
   return v && typeof v === "object" && !Array.isArray(v);
 }
 
+
 function norm(s: any): string {
   return String(s ?? "").replace(/\s/g, "").trim();
 }
+
 
 function pickAmountSmart(v: any): any {
   if (v === null || v === undefined) return 0;
@@ -294,6 +317,7 @@ function pickAmountSmart(v: any): any {
   return 0;
 }
 
+
 function toNumber(v: unknown): number {
   if (v === null || v === undefined) return NaN;
   if (typeof v === "number") return v;
@@ -301,6 +325,7 @@ function toNumber(v: unknown): number {
   const n = Number(s);
   return Number.isFinite(n) ? n : NaN;
 }
+
 
 function emptyResult(msg: string) {
   return {
